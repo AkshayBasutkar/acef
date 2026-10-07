@@ -46,14 +46,16 @@ class LLMClient:
         settings = settings or get_settings()
 
         if settings.llm_provider == "gemini":
+            api_key = settings.gemini_api_key or "placeholder_gemini_key"
             self.client = OpenAI(
-                api_key=settings.gemini_api_key,
+                api_key=api_key,
                 base_url=settings.gemini_base_url,
             )
             self.model = settings.gemini_model
         elif settings.llm_provider == "groq":
+            api_key = settings.groq_api_key or "placeholder_groq_key"
             self.client = OpenAI(
-                api_key=settings.groq_api_key,
+                api_key=api_key,
                 base_url=settings.groq_base_url,
             )
             self.model = settings.groq_model
