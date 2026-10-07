@@ -1,0 +1,26 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest / Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment variables & local secrets
+.env
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# Chroma local vector database storage (keep placeholder)
+data/chroma/*
+!data/chroma/.gitkeep
+
+# OS generated files
+.DS_Store
+Thumbs.db
