@@ -210,3 +210,27 @@ class TestMemRAG:
         rag = MemRAG(mock_client, mock_embed)
         chunks = rag.retrieve("query", session_id="sess-1")
         assert chunks == []
+
+    def test_retrieve_drops_chunks_below_relevance_floor(self, mock_components):
+        mock_client, mock_col, mock_embed = mock_components
+        mock_col.count.return_value = 2
+
+        # Distance 0.85 -> similarity 0.15 < relevance_floor (0.30)
+        mock_col.query.side_effect = [
+            {
+                "ids": [["doc1"]],
+                "documents": [["Irrelevant doc excerpt"]],
+                "metadatas": [[{"source": "random.txt"}]],
+                "distances": [[0.85]],
+            },
+            {
+                "ids": [[]],
+                "documents": [[]],
+                "metadatas": [[]],
+                "distances": [[]],
+            },
+        ]
+
+        rag = MemRAG(mock_client, mock_embed, relevance_floor=0.30)
+        chunks = rag.retrieve("quantum physics", session_id="sess-1")
+        assert chunks == []

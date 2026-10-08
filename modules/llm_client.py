@@ -100,14 +100,21 @@ class LLMClient:
         """
         system_prompt = SYSTEM_PROMPTS.get(query_type, SYSTEM_PROMPTS["simple"])
 
-        # Build user message — with or without retrieved context
+        # Build user message — with or without retrieved context (I-11)
         if context_chunks:
             context_text = "\n\n---\n\n".join(context_chunks)
             # Simple character-based truncation to stay within budget
             context_text = context_text[: self._max_context_chars]
             user_message = f"Context:\n{context_text}\n\nQuestion: {query}"
         else:
-            user_message = query
+            # When retrieval is empty, omit context block entirely and prompt with fallback note
+            if query_type in ("code", "memory"):
+                user_message = (
+                    f"Note: No relevant {query_type} context was found in the indexed index.\n\n"
+                    f"Question: {query}"
+                )
+            else:
+                user_message = query
 
         logger.debug(
             "LLM request — model=%s  type=%s  context_len=%d",

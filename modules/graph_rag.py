@@ -46,6 +46,16 @@ def _extract_search_terms(query: str) -> str:
     str
         A Lucene query string like "hash_password OR login OR auth"
     """
+def escape_lucene(term: str) -> str:
+    """
+    Escape Lucene special characters:
+    + - & | ! ( ) { } [ ] ^ " ~ * ? : \\ /
+    """
+    lucene_chars = r'([+\-&|!(){}\[\]^"~*?:\\/])'
+    return re.sub(lucene_chars, r'\\\1', term)
+
+
+def _extract_search_terms(query: str) -> str:
     matches = []
     for match in IDENTIFIER_PATTERN.finditer(query):
         # Each group corresponds to a different pattern variant
@@ -60,9 +70,13 @@ def _extract_search_terms(query: str) -> str:
         matches = words[:3]
 
     if not matches:
-        return query  # last resort: use the raw query
+        return escape_lucene(query)  # last resort: use the escaped raw query
 
-    search_terms = " OR ".join(matches)
+    # I-11: Escape Lucene special characters for each term
+    escaped = [escape_lucene(m) for m in matches if m.strip()]
+    if not escaped:
+        return "*"
+    search_terms = " OR ".join(escaped)
     logger.debug("Extracted search terms: %s", search_terms)
     return search_terms
 

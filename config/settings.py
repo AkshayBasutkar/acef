@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     memory_top_k: int = 5
     memory_long_conversation_turns: int = 3     # session turn count that counts as "long"
     doc_route_threshold: float = 0.45           # document probe similarity threshold for MEMORY routing
+    memory_relevance_floor: float = 0.30        # minimum similarity floor below which chunks are dropped
 
     # ── Context budget ───────────────────────────────────────────────────────
     max_context_chars: int = 6000               # simple character-based truncation

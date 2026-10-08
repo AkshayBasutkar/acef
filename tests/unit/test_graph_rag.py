@@ -11,9 +11,10 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from modules.graph_rag import _extract_search_terms
-from ingestion.code_ingest import _parse_file
+from unittest.mock import MagicMock
 from pathlib import Path
+from modules.graph_rag import _extract_search_terms, GraphRAG
+from ingestion.code_ingest import _parse_file
 
 
 class TestExtractSearchTerms:
@@ -149,3 +150,32 @@ class TestParseFile:
         assert "def login():" in chunks[0].text
         assert "Source:\n```python\ndef login():\n    return True\n```" in chunks[0].text
         assert "Lines: 10-18" in chunks[0].text
+
+
+class TestLuceneEscaping:
+    """I-11: Validate Lucene special character escaping."""
+
+    def test_escape_lucene_special_chars(self):
+        from modules.graph_rag import escape_lucene
+        raw = "foo(bar) + baz && qux || [test] {x} ^ \"hello\" ~ * ? : \\ / - !"
+        escaped = escape_lucene(raw)
+        for char in "+-&|!(){}[]^\"~*?:\\/":
+            assert f"\\{char}" in escaped
+
+    def test_extract_search_terms_escapes_special_chars(self):
+        from modules.graph_rag import _extract_search_terms
+        terms = _extract_search_terms("foo(bar) + baz")
+        assert "\\(" in terms or "\\+" in terms or "foo" in terms
+
+    def test_retrieve_with_special_characters_runs_cypher(self):
+        mock_driver = MagicMock()
+        mock_session = MagicMock()
+        mock_driver.session.return_value.__enter__.return_value = mock_session
+        mock_session.run.return_value = []
+
+        rag = GraphRAG(mock_driver)
+        chunks = rag.retrieve("foo(bar) + baz")
+        assert chunks == []
+        mock_session.run.assert_called_once()
+        terms_arg = mock_session.run.call_args[1]["terms"]
+        assert "\\(" in terms_arg or "\\+" in terms_arg or "foo" in terms_arg

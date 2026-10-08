@@ -150,3 +150,34 @@ def test_retrieval_exception_gracefully_degrades(mock_pipeline):
         query_type="code",
         context_chunks=[],
     )
+
+
+def test_empty_chunks_omits_context_block_in_prompt():
+    """I-11: Empty context chunks must omit Context block entirely."""
+    from modules.llm_client import LLMClient
+    from unittest.mock import MagicMock
+
+    client = LLMClient.__new__(LLMClient)
+    client.model = "gemini-2.0-flash"
+    client._max_context_chars = 6000
+    mock_openai = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content="General answer"))]
+    mock_openai.chat.completions.create.return_value = mock_resp
+    client.client = mock_openai
+
+    # SIMPLE with empty chunks
+    ans = client.generate(query="What is photosynthesis?", query_type="simple", context_chunks=[])
+    assert ans == "General answer"
+    called_messages = mock_openai.chat.completions.create.call_args[1]["messages"]
+    user_msg = called_messages[1]["content"]
+    assert "Context:" not in user_msg
+    assert "<context>" not in user_msg
+    assert user_msg == "What is photosynthesis?"
+
+    # CODE with empty chunks
+    client.generate(query="Explain foo()", query_type="code", context_chunks=[])
+    called_messages2 = mock_openai.chat.completions.create.call_args[1]["messages"]
+    user_msg2 = called_messages2[1]["content"]
+    assert "Context:" not in user_msg2
+    assert "No relevant code context was found" in user_msg2

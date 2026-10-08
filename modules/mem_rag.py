@@ -18,6 +18,7 @@ import time
 import uuid
 from typing import Optional
 
+from config.settings import get_settings
 from core.schemas import QueryType, RetrievedChunk
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 class MemRAG:
     """Document and conversation memory retrieval using ChromaDB."""
 
-    def __init__(self, chroma_client, embedding_model):
+    def __init__(self, chroma_client, embedding_model, relevance_floor: Optional[float] = None):
         """
         Parameters
         ----------
@@ -34,15 +35,20 @@ class MemRAG:
             Shared Chroma client (persistent local directory).
         embedding_model : sentence_transformers.SentenceTransformer
             Shared embedding model instance.
+        relevance_floor : float, optional
+            Minimum cosine similarity floor below which chunks are discarded.
         """
         self._collection = chroma_client.get_or_create_collection(
             name="memory",
             metadata={"hnsw:space": "cosine"},
         )
         self._embed = embedding_model
+        settings = get_settings()
+        self._relevance_floor = relevance_floor if relevance_floor is not None else getattr(settings, "memory_relevance_floor", 0.30)
         logger.info(
-            "MemRAG ready — existing_items=%d in 'memory' collection",
+            "MemRAG ready — existing_items=%d in 'memory' collection, relevance_floor=%.2f",
             self._collection.count(),
+            self._relevance_floor,
         )
 
     @property
@@ -152,11 +158,15 @@ class MemRAG:
                     doc_res["metadatas"][0],
                     doc_res["distances"][0],
                 ):
-                    candidates.append({
-                        "text": doc,
-                        "source": meta.get("source", "document"),
-                        "distance": dist,
-                    })
+                    sim = max(0.0, 1.0 - dist)
+                    # I-11: Drop chunks below relevance floor
+                    if sim >= self._relevance_floor:
+                        candidates.append({
+                            "text": doc,
+                            "source": meta.get("source", "document") if isinstance(meta, dict) else "document",
+                            "distance": dist,
+                            "similarity": sim,
+                        })
         except Exception as e:
             logger.warning("Error querying document chunks: %s", e)
 
@@ -179,11 +189,15 @@ class MemRAG:
                     conv_res["metadatas"][0],
                     conv_res["distances"][0],
                 ):
-                    candidates.append({
-                        "text": doc,
-                        "source": f"conversation turn ({session_id})",
-                        "distance": dist,
-                    })
+                    sim = max(0.0, 1.0 - dist)
+                    # I-11: Drop conversation turns below relevance floor
+                    if sim >= self._relevance_floor:
+                        candidates.append({
+                            "text": doc,
+                            "source": f"conversation turn ({session_id})",
+                            "distance": dist,
+                            "similarity": sim,
+                        })
         except Exception as e:
             logger.warning("Error querying conversation turns: %s", e)
 
