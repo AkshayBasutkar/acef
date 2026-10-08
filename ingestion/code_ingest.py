@@ -160,88 +160,136 @@ def ingest_codebase(root_path: str, neo4j_driver) -> dict:
         for sym in data["symbols"]:
             all_symbol_names.add(sym["name"])
 
+    root_str = str(root)
+
     # ── Phase 2: Write everything to Neo4j ───────────────────────────────
-    counters = {"files": 0, "symbols": 0, "calls": 0, "imports": 0}
-
     with neo4j_driver.session() as session:
-        # Clear existing data for a clean re-ingestion
-        session.run("MATCH (n) DETACH DELETE n")
-        logger.info("Cleared existing Neo4j data for fresh ingestion.")
+        # I-12: Delete all File and Symbol nodes associated with this root before re-ingestion
+        all_paths = list(file_data.keys())
+        session.run(
+            """
+            MATCH (f:File)
+            WHERE f.root = $root OR f.path IN $paths
+            OPTIONAL MATCH (f)-[:DEFINES]->(s:Symbol)
+            DETACH DELETE s, f
+            """,
+            root=root_str,
+            paths=all_paths,
+        )
+        session.run(
+            """
+            MATCH (s:Symbol {root: $root})
+            DETACH DELETE s
+            """,
+            root=root_str,
+        )
+        logger.info("Cleared existing Neo4j data for root %s.", root_str)
 
-        # Create File nodes
-        for rel_path in file_data:
-            file_name = Path(rel_path).name
-            session.run(
-                "MERGE (f:File {path: $path}) SET f.name = $name",
-                path=rel_path, name=file_name,
-            )
-            counters["files"] += 1
+        # Batch create File nodes via UNWIND
+        file_payload = [
+            {"path": rel_path, "name": Path(rel_path).name}
+            for rel_path in file_data
+        ]
+        session.run(
+            """
+            UNWIND $files AS f_data
+            MERGE (f:File {path: f_data.path})
+            SET f.name = f_data.name, f.root = $root
+            """,
+            files=file_payload,
+            root=root_str,
+        )
 
-        # Create Symbol nodes and DEFINES edges
+        # Batch create Symbol nodes and DEFINES edges via UNWIND
+        symbol_payload = []
         for rel_path, data in file_data.items():
             for sym in data["symbols"]:
-                session.run(
-                    """
-                    MATCH (f:File {path: $file_path})
-                    CREATE (s:Symbol {
-                        name: $name,
-                        kind: $kind,
-                        docstring: $docstring,
-                        file_path: $file_path,
-                        lineno: $lineno,
-                        end_lineno: $end_lineno,
-                        source: $source
-                    })
-                    CREATE (f)-[:DEFINES]->(s)
-                    """,
-                    file_path=rel_path,
-                    name=sym["name"],
-                    kind=sym["kind"],
-                    docstring=sym["docstring"],
-                    lineno=sym["lineno"],
-                    end_lineno=sym["end_lineno"],
-                    source=sym["source"],
-                )
-                counters["symbols"] += 1
+                symbol_payload.append({
+                    "file_path": rel_path,
+                    "name": sym["name"],
+                    "kind": sym["kind"],
+                    "docstring": sym["docstring"],
+                    "lineno": sym["lineno"],
+                    "end_lineno": sym["end_lineno"],
+                    "source": sym["source"],
+                })
 
-        # Create IMPORTS edges (intra-project only)
+        if symbol_payload:
+            session.run(
+                """
+                UNWIND $symbols AS sym
+                MATCH (f:File {path: sym.file_path, root: $root})
+                CREATE (s:Symbol {
+                    name: sym.name,
+                    kind: sym.kind,
+                    docstring: sym.docstring,
+                    file_path: sym.file_path,
+                    lineno: sym.lineno,
+                    end_lineno: sym.end_lineno,
+                    source: sym.source,
+                    root: $root
+                })
+                CREATE (f)-[:DEFINES]->(s)
+                """,
+                symbols=symbol_payload,
+                root=root_str,
+            )
+
+        # Batch create IMPORTS edges via UNWIND
+        import_payload = []
         for rel_path, data in file_data.items():
             for imported_module in data["imports"]:
-                # Check if the imported module resolves to a file in this project
-                # Match on file stem (e.g., "auth" matches "auth.py")
                 module_base = imported_module.split(".")[-1]
                 if module_base in stem_to_path:
                     target_path = stem_to_path[module_base]
-                    if target_path != rel_path:  # don't self-import
-                        session.run(
-                            """
-                            MATCH (source:File {path: $source_path})
-                            MATCH (target:File {path: $target_path})
-                            MERGE (source)-[:IMPORTS]->(target)
-                            """,
-                            source_path=rel_path,
-                            target_path=target_path,
-                        )
-                        counters["imports"] += 1
+                    if target_path != rel_path:
+                        import_payload.append({
+                            "source_path": rel_path,
+                            "target_path": target_path,
+                        })
 
-        # Create CALLS edges (best-effort, same-run resolution)
+        if import_payload:
+            session.run(
+                """
+                UNWIND $imports AS imp
+                MATCH (source:File {path: imp.source_path, root: $root})
+                MATCH (target:File {path: imp.target_path, root: $root})
+                MERGE (source)-[:IMPORTS]->(target)
+                """,
+                imports=import_payload,
+                root=root_str,
+            )
+
+        # Batch create CALLS edges via UNWIND
+        call_payload = []
         for rel_path, data in file_data.items():
             for sym in data["symbols"]:
                 for called_name in sym["calls"]:
-                    # Only create edge if the callee is a known symbol
-                    # from this same ingestion run
                     if called_name in all_symbol_names and called_name != sym["name"]:
-                        session.run(
-                            """
-                            MATCH (caller:Symbol {name: $caller_name, file_path: $file_path})
-                            MATCH (callee:Symbol {name: $callee_name})
-                            MERGE (caller)-[:CALLS]->(callee)
-                            """,
-                            caller_name=sym["name"],
-                            file_path=rel_path,
-                            callee_name=called_name,
-                        )
-                        counters["calls"] += 1
+                        call_payload.append({
+                            "caller_name": sym["name"],
+                            "file_path": rel_path,
+                            "callee_name": called_name,
+                        })
+
+        if call_payload:
+            session.run(
+                """
+                UNWIND $calls AS call
+                MATCH (caller:Symbol {name: call.caller_name, file_path: call.file_path, root: $root})
+                MATCH (callee:Symbol {name: call.callee_name, root: $root})
+                MERGE (caller)-[:CALLS]->(callee)
+                """,
+                calls=call_payload,
+                root=root_str,
+            )
+
+        counters = {
+            "files": len(file_payload),
+            "symbols": len(symbol_payload),
+            "calls": len(call_payload),
+            "imports": len(import_payload),
+        }
 
     logger.info(
         "Ingestion complete — files=%d, symbols=%d, calls=%d, imports=%d",

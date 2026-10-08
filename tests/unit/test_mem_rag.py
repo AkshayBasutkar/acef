@@ -89,6 +89,40 @@ class TestIngestDocument:
         assert kwargs["metadatas"][0]["type"] == "document"
 
 
+class TestIdempotentDocumentIngest:
+    """I-12: Test that re-ingesting documents clears stale chunks."""
+
+    def test_reingest_shorter_document_cleans_stale_chunks(self, tmp_path):
+        import chromadb
+        client = chromadb.EphemeralClient()
+        col = client.create_collection("test_mem")
+
+        class SimpleFakeEmbed:
+            def encode(self, text):
+                return [0.1, 0.2, 0.3]
+
+        doc = tmp_path / "manual.txt"
+        # Long document -> multiple chunks with chunk_size=10
+        doc.write_text("word " * 50, encoding="utf-8")
+
+        count1 = ingest_document(str(doc), col, SimpleFakeEmbed(), chunk_size=10, chunk_overlap=2)
+        assert count1 > 1
+        assert col.count() == count1
+
+        # Ingest twice -> count is still count1 (not doubled)
+        count2 = ingest_document(str(doc), col, SimpleFakeEmbed(), chunk_size=10, chunk_overlap=2)
+        assert count2 == count1
+        assert col.count() == count1
+
+        # Replace with short document -> 1 chunk
+        doc.write_text("short single chunk", encoding="utf-8")
+        count3 = ingest_document(str(doc), col, SimpleFakeEmbed(), chunk_size=10, chunk_overlap=2)
+        assert count3 == 1
+        # Crucial: stale chunks from previous run were deleted, so count is exactly 1!
+        assert col.count() == 1
+
+
+
 # ── MemRAG Retrieval & Conversation Memory Tests ─────────────────────────────
 
 class TestMemRAG:

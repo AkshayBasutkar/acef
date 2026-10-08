@@ -154,6 +154,28 @@ def ingest_document(
             "chunk_index": i,
         })
 
+    # I-12: Delete any existing chunks for this document before storing new ones.
+    # Guarantees idempotence: if a document got shorter, stale chunks are removed.
+    try:
+        if hasattr(chroma_collection, "get") and hasattr(chroma_collection, "delete"):
+            existing = chroma_collection.get(
+                where={
+                    "$and": [
+                        {"type": "document"},
+                        {"source": filename},
+                    ]
+                }
+            )
+            if isinstance(existing, dict) and existing.get("ids"):
+                chroma_collection.delete(ids=existing["ids"])
+                logger.info(
+                    "Deleted %d existing chunks for document %s before re-ingestion.",
+                    len(existing["ids"]),
+                    filename,
+                )
+    except Exception as e:
+        logger.debug("Could not clear previous chunks for %s: %s", filename, e)
+
     # Use upsert if available to support re-ingesting documents cleanly
     if hasattr(chroma_collection, "upsert"):
         chroma_collection.upsert(
