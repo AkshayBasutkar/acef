@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # ── Demo ─────────────────────────────────────────────────────────────────
     demo_codebase_path: str = "./data/demo_codebase"
 
+    # ── Ingest Limits & Safety (I-10) ─────────────────────────────────────────
+    allowed_ingest_roots: list[str] = ["./data"]
+    max_upload_bytes: int = 10_485_760          # 10 MB limit for document uploads
+
 
 @lru_cache
 def get_settings() -> Settings:

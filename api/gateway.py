@@ -158,13 +158,26 @@ async def ingest_code(payload: Optional[IngestCodeRequest] = None, root_path: Op
     Parse a Python codebase into Neo4j nodes and edges.
     Accepts root_path via JSON body or query parameter.
     """
+    settings = get_settings()
     path_to_ingest = root_path
     if not path_to_ingest and payload:
         path_to_ingest = payload.root_path
     if not path_to_ingest:
-        path_to_ingest = get_settings().demo_codebase_path
+        path_to_ingest = settings.demo_codebase_path
 
     resolved_path = Path(path_to_ingest).resolve()
+
+    # I-10: Path traversal and root allowlist validation
+    allowed_roots = [Path(p).resolve() for p in settings.allowed_ingest_roots]
+    is_allowed = any(
+        resolved_path == r or r in resolved_path.parents for r in allowed_roots
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Path '{path_to_ingest}' is outside allowed ingest roots: {settings.allowed_ingest_roots}",
+        )
+
     if not resolved_path.is_dir():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -207,9 +220,22 @@ async def ingest_doc(file: UploadFile = File(...)) -> dict:
             detail=f"Unsupported file type '{suffix}'. Allowed: .txt, .md, .pdf",
         )
 
-    # Save uploaded file to temporary location
+    settings = get_settings()
+    max_bytes = settings.max_upload_bytes
+    total_bytes = 0
+
+    # I-10: Stream and validate maximum upload size
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        shutil.copyfileobj(file.file, tmp)
+        while chunk := await file.read(65536):
+            total_bytes += len(chunk)
+            if total_bytes > max_bytes:
+                tmp.close()
+                Path(tmp.name).unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File exceeds maximum allowed upload size of {max_bytes} bytes",
+                )
+            tmp.write(chunk)
         tmp_path = Path(tmp.name)
 
     try:
