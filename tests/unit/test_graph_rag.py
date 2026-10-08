@@ -104,3 +104,48 @@ class TestParseFile:
         result = _parse_file(demo_codebase_path / "utils.py")
         for sym in result["symbols"]:
             assert sym["lineno"] > 0
+
+    def test_source_code_extracted(self, demo_codebase_path):
+        result = _parse_file(demo_codebase_path / "auth.py")
+        login_sym = [s for s in result["symbols"] if s["name"] == "login"][0]
+        assert "def login(" in login_sym["source"]
+        assert "hash_password(password)" in login_sym["source"]
+        assert login_sym["end_lineno"] >= login_sym["lineno"]
+
+    def test_source_code_truncation(self, demo_codebase_path):
+        result = _parse_file(demo_codebase_path / "auth.py", max_source_chars=30)
+        login_sym = [s for s in result["symbols"] if s["name"] == "login"][0]
+        assert len(login_sym["source"]) <= 30
+
+    def test_retrieve_formats_source_code_block(self):
+        from unittest.mock import MagicMock
+        from modules.graph_rag import GraphRAG
+
+        mock_driver = MagicMock()
+        mock_session = MagicMock()
+        mock_driver.session.return_value.__enter__.return_value = mock_session
+
+        # 1. Full-text search returns symbol anchor
+        mock_session.run.side_effect = [
+            [{"name": "login", "score": 1.5}],  # fulltext anchor
+            [{  # traversal record
+                "name": "login",
+                "kind": "function",
+                "docstring": "Authenticate user.",
+                "lineno": 10,
+                "end_lineno": 18,
+                "source_code": "def login():\n    return True",
+                "file_path": "auth.py",
+                "calls": ["hash_password"],
+                "called_by": ["main"],
+            }],
+        ]
+
+        rag = GraphRAG(mock_driver)
+        chunks = rag.retrieve("Why does login fail?")
+
+        assert len(chunks) == 1
+        assert "auth.py" in chunks[0].source
+        assert "def login():" in chunks[0].text
+        assert "Source:\n```python\ndef login():\n    return True\n```" in chunks[0].text
+        assert "Lines: 10-18" in chunks[0].text

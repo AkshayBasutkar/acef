@@ -146,6 +146,8 @@ class GraphRAG:
                                s.kind AS kind,
                                s.docstring AS docstring,
                                s.lineno AS lineno,
+                               s.end_lineno AS end_lineno,
+                               s.source AS source_code,
                                f.path AS file_path,
                                collect(DISTINCT callee.name) AS calls,
                                collect(DISTINCT caller.name) AS called_by
@@ -157,14 +159,20 @@ class GraphRAG:
                         file_path = record["file_path"] or "unknown"
                         calls = [c for c in record["calls"] if c is not None]
                         called_by = [c for c in record["called_by"] if c is not None]
+                        source_code = record.get("source_code") or ""
+                        lineno = record["lineno"]
+                        end_lineno = record.get("end_lineno") or lineno
+
+                        lines_str = f"{lineno}-{end_lineno}" if end_lineno != lineno else str(lineno)
+                        source_block = f"\nSource:\n```python\n{source_code.strip()}\n```" if source_code.strip() else ""
 
                         text = (
-                            f"Function/Class: {record['name']} "
-                            f"({record['kind']}) in {file_path}\n"
-                            f"Line: {record['lineno']}\n"
+                            f"Function/Class: {record['name']} ({record['kind']}) in {file_path}\n"
+                            f"Lines: {lines_str}\n"
                             f"Docstring: {record['docstring'] or 'none'}\n"
                             f"Calls: {', '.join(calls) or 'none'}\n"
                             f"Called by: {', '.join(called_by) or 'none'}"
+                            f"{source_block}"
                         )
 
                         chunk = RetrievedChunk(text=text, source=file_path)

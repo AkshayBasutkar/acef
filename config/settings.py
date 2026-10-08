@@ -44,6 +44,7 @@ class Settings(BaseSettings):
 
     # ── Context budget ───────────────────────────────────────────────────────
     max_context_chars: int = 6000               # simple character-based truncation
+    graph_source_max_chars: int = 1200          # per-symbol code body truncation for GraphRAG
 
     # ── Demo ─────────────────────────────────────────────────────────────────
     demo_codebase_path: str = "./data/demo_codebase"
