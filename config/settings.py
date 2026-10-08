@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     # ── Memory retrieval ─────────────────────────────────────────────────────
     memory_top_k: int = 5
     memory_long_conversation_turns: int = 3     # session turn count that counts as "long"
+    doc_route_threshold: float = 0.45           # document probe similarity threshold for MEMORY routing
 
     # ── Context budget ───────────────────────────────────────────────────────
     max_context_chars: int = 6000               # simple character-based truncation

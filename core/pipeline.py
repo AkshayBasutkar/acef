@@ -101,8 +101,9 @@ class Pipeline:
 
         # ── 2. Classification ────────────────────────────────────────────────
         turn_count = self.mem_rag.session_turn_count(str(request.session_id))
-        query_type = classify(request.query, turn_count)
-        logger.info("Query classified as: %s (turn_count=%d)", query_type.value, turn_count)
+        last_turn = self.mem_rag.last_turn_type(str(request.session_id))
+        query_type = classify(request.query, turn_count, last_turn_type=last_turn)
+        logger.info("Query classified as: %s (turn_count=%d, last_turn=%s)", query_type.value, turn_count, last_turn)
 
         # ── 3. Context Retrieval Branch ──────────────────────────────────────
         chunks: list[RetrievedChunk] = []

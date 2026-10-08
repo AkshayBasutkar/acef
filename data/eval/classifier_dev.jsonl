@@ -1,0 +1,40 @@
+{"query": "What is the capital of France?", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "Explain how photosynthesis works.", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "Give me three tips for a job interview.", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "How many ounces are in a pound?", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "Write a short poem about the monsoon.", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "What's the difference between an iPhone and an Android phone?", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": true}
+{"query": "Recommend a book about the history of YouTube.", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": true}
+{"query": "I found a bug in my garden, what is it?", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": true}
+{"query": "There was an error in my tax return, who should I contact?", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": true}
+{"query": "What class should I take to learn pottery?", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": true}
+{"query": "How do I import goods from Japan?", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": true}
+{"query": "What is a document database?", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": true}
+{"query": "Who discussed the theory of relativity first?", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": true}
+{"query": "What's the best way to remember a list of numbers?", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": true}
+{"query": "Can you recommend something to read before bed?", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": true}
+{"query": "Should I get up earlier to be productive?", "expected": "simple", "needs_corpus": false, "min_session_turns": 0, "hard_negative": true}
+{"query": "What does the login function call?", "expected": "code", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "Why does hash_password raise an exception?", "expected": "code", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "Refactor the `login` method to be async.", "expected": "code", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "Which functions call hash_password?", "expected": "code", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "Explain what utils.py does.", "expected": "code", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "Traceback (most recent call last): File \"auth.py\", line 12 — what went wrong?", "expected": "code", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "Where is the UserProfile class defined?", "expected": "code", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "What does main() call?", "expected": "code", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "What does login call?", "expected": "code", "needs_corpus": true, "min_session_turns": 0, "hard_negative": false}
+{"query": "Fix this: `for i in range(10) print(i)`", "expected": "code", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "How do I fix a TypeError in my script?", "expected": "code", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "Add type hints to calculate_total().", "expected": "code", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "What did we discuss earlier about the budget?", "expected": "memory", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "Summarize the PDF I uploaded.", "expected": "memory", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "According to the document, what is the refund policy?", "expected": "memory", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "Remind me what you said about deadlines.", "expected": "memory", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "What was my previous question?", "expected": "memory", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "As we talked about last time, which option did I pick?", "expected": "memory", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "What are the pricing tiers?", "expected": "memory", "needs_corpus": true, "min_session_turns": 0, "hard_negative": false}
+{"query": "In the document, which plan includes priority support?", "expected": "memory", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
+{"query": "and the second one?", "expected": "memory", "needs_corpus": false, "min_session_turns": 3, "hard_negative": false}
+{"query": "why is that?", "expected": "memory", "needs_corpus": false, "min_session_turns": 3, "hard_negative": false}
+{"query": "what do you mean?", "expected": "memory", "needs_corpus": false, "min_session_turns": 3, "hard_negative": false}
+{"query": "Compare this with what I told you before about my budget.", "expected": "memory", "needs_corpus": false, "min_session_turns": 0, "hard_negative": false}
