@@ -18,7 +18,7 @@ import time
 import uuid
 from typing import Optional
 
-from core.schemas import RetrievedChunk
+from core.schemas import QueryType, RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,13 @@ class MemRAG:
         ]
 
     # ─────────────────────────────────────────────────────────────────────────
-    def append_turn(self, session_id: str, query: str, response: str) -> None:
+    def append_turn(
+        self,
+        session_id: str,
+        query: str,
+        response: str,
+        query_type: str = "simple",
+    ) -> None:
         """
         Store a conversation turn in the memory collection.
 
@@ -156,6 +162,8 @@ class MemRAG:
             User query.
         response : str
             Assistant response.
+        query_type : str
+            The classification type of the query (simple, code, memory).
         """
         turn_text = f"User asked: {query}\nAssistant answered: {response}"
         turn_id = f"turn_{session_id}_{uuid.uuid4().hex[:8]}"
@@ -170,10 +178,53 @@ class MemRAG:
             metadatas=[{
                 "type": "conversation",
                 "session_id": str(session_id),
+                "query_type": str(query_type),
                 "timestamp": time.time(),
             }],
         )
-        logger.debug("Appended turn for session_id=%s (turn_id=%s)", session_id, turn_id)
+        logger.debug(
+            "Appended turn for session_id=%s (turn_id=%s, type=%s)",
+            session_id, turn_id, query_type,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    def last_turn_type(self, session_id: str) -> Optional[QueryType]:
+        """
+        Return the QueryType of the most recent turn in the given session, or None.
+
+        Parameters
+        ----------
+        session_id : str
+            Session identifier.
+
+        Returns
+        -------
+        QueryType | None
+            QueryType of the last turn, or None if no turns exist for this session.
+        """
+        try:
+            res = self._collection.get(
+                where={
+                    "$and": [
+                        {"type": "conversation"},
+                        {"session_id": str(session_id)},
+                    ]
+                },
+                include=["metadatas"],
+            )
+            metas = res.get("metadatas", [])
+            if not metas:
+                return None
+
+            latest = max(metas, key=lambda m: m.get("timestamp", 0))
+            raw_type = latest.get("query_type", "simple")
+            try:
+                return QueryType(raw_type)
+            except ValueError:
+                return QueryType.SIMPLE
+        except Exception as e:
+            logger.warning("Error getting last turn type for session %s: %s", session_id, e)
+            return None
 
     # ─────────────────────────────────────────────────────────────────────────
     def session_turn_count(self, session_id: str) -> int:

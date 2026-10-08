@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
-from core.schemas import RetrievedChunk
+from core.schemas import QueryType, RetrievedChunk
 from ingestion.document_ingest import _chunk_text, _extract_text, ingest_document
 from modules.mem_rag import MemRAG
 
@@ -114,7 +114,7 @@ class TestMemRAG:
         mock_client, mock_col, mock_embed = mock_components
         rag = MemRAG(mock_client, mock_embed)
 
-        rag.append_turn("sess-1", "What is the plan?", "Pro tier is $49")
+        rag.append_turn("sess-1", "What is the plan?", "Pro tier is $49", query_type="code")
 
         mock_col.add.assert_called_once()
         kwargs = mock_col.add.call_args[1]
@@ -122,6 +122,26 @@ class TestMemRAG:
         assert "Assistant answered: Pro tier is $49" in kwargs["documents"][0]
         assert kwargs["metadatas"][0]["type"] == "conversation"
         assert kwargs["metadatas"][0]["session_id"] == "sess-1"
+        assert kwargs["metadatas"][0]["query_type"] == "code"
+
+    def test_last_turn_type(self, mock_components):
+        mock_client, mock_col, mock_embed = mock_components
+        # Return two turns with different timestamps
+        mock_col.get.return_value = {
+            "metadatas": [
+                {"type": "conversation", "session_id": "sess-1", "query_type": "simple", "timestamp": 100.0},
+                {"type": "conversation", "session_id": "sess-1", "query_type": "code", "timestamp": 200.0},
+            ]
+        }
+        rag = MemRAG(mock_client, mock_embed)
+        last_type = rag.last_turn_type("sess-1")
+        assert last_type == QueryType.CODE
+
+    def test_last_turn_type_empty_returns_none(self, mock_components):
+        mock_client, mock_col, mock_embed = mock_components
+        mock_col.get.return_value = {"metadatas": []}
+        rag = MemRAG(mock_client, mock_embed)
+        assert rag.last_turn_type("sess-empty") is None
 
     def test_session_turn_count(self, mock_components):
         mock_client, mock_col, mock_embed = mock_components

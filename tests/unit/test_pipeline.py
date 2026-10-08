@@ -47,6 +47,10 @@ def test_cache_hit_short_circuits(mock_pipeline):
     mock_graph_rag.retrieve.assert_not_called()
     mock_mem_rag.retrieve.assert_not_called()
     mock_llm.generate.assert_not_called()
+    # I-02: Cache hits are recorded in conversation memory
+    mock_mem_rag.append_turn.assert_called_once_with(
+        str(req.session_id), "What is Paris?", "Cached instant answer", query_type=QueryType.SIMPLE
+    )
 
 
 def test_simple_query_flow(mock_pipeline):
@@ -66,7 +70,10 @@ def test_simple_query_flow(mock_pipeline):
         context_chunks=[],
     )
     mock_cache.store.assert_called_once()
-    mock_mem_rag.append_turn.assert_not_called()
+    # I-02: Simple queries are recorded in conversation memory
+    mock_mem_rag.append_turn.assert_called_once_with(
+        str(req.session_id), "What is 2 + 2?", "Mock LLM answer", query_type=QueryType.SIMPLE
+    )
 
 
 def test_code_query_flow(mock_pipeline):
@@ -88,7 +95,10 @@ def test_code_query_flow(mock_pipeline):
     )
     # I-01: CODE answers depend on codebase state and are never cached
     mock_cache.store.assert_not_called()
-    mock_mem_rag.append_turn.assert_not_called()
+    # I-02: Code queries are recorded in conversation memory
+    mock_mem_rag.append_turn.assert_called_once_with(
+        str(req.session_id), "Explain the login function in auth.py", "Mock LLM answer", query_type=QueryType.CODE
+    )
 
 
 def test_memory_query_flow(mock_pipeline):
@@ -111,15 +121,18 @@ def test_memory_query_flow(mock_pipeline):
     )
     # I-01: MEMORY answers depend on session/document state and are never cached
     mock_cache.store.assert_not_called()
-    mock_mem_rag.append_turn.assert_called_once_with(str(sess_id), req.query, "Mock LLM answer")
+    mock_mem_rag.append_turn.assert_called_once_with(
+        str(sess_id), req.query, "Mock LLM answer", query_type=QueryType.MEMORY
+    )
 
 
-def test_empty_llm_response_not_cached(mock_pipeline):
-    pipe, mock_cache, _, _, mock_llm = mock_pipeline
+def test_empty_llm_response_not_cached_and_not_recorded(mock_pipeline):
+    pipe, mock_cache, _, mock_mem_rag, mock_llm = mock_pipeline
     mock_llm.generate.return_value = "   "
     req = QueryRequest(query="What is 2 + 2?")
     res = pipe.handle_query(req)
     mock_cache.store.assert_not_called()
+    mock_mem_rag.append_turn.assert_not_called()
 
 
 def test_retrieval_exception_gracefully_degrades(mock_pipeline):

@@ -138,6 +138,15 @@ curl -X POST http://localhost:8000/query \
 # -> from_cache: true
 ```
 
+### 4. Session Continuity & Conversation Memory
+Every `/query` response returns a `session_id`. To continue a multi-turn conversation and allow MemRAG to recall prior turns, clients **must send back the returned `session_id`**:
+```bash
+curl -X POST http://localhost:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "And what was the second tier?", "session_id": "00000000-0000-0000-0000-000000000000"}'
+```
+Omitting `session_id` automatically creates a fresh UUID session with isolated conversation memory.
+
 ---
 
 ## Running the Test Suite

@@ -77,6 +77,17 @@ class Pipeline:
         try:
             cached = self.cache.lookup(request.query)
             if cached is not None:
+                # I-02: Record cache hits in conversation memory so full session history is preserved
+                try:
+                    self.mem_rag.append_turn(
+                        str(request.session_id),
+                        request.query,
+                        cached,
+                        query_type=QueryType.SIMPLE,
+                    )
+                except Exception as e:
+                    logger.warning("Conversation append_turn failed on cache hit: %s", e)
+
                 return QueryResponse(
                     session_id=request.session_id,
                     response=cached,
@@ -127,9 +138,15 @@ class Pipeline:
             except Exception as e:
                 logger.warning("Cache store failed: %s", e)
 
-        if query_type == QueryType.MEMORY:
+        # I-02: Record EVERY successful turn in conversation memory regardless of query type
+        if response_text and response_text.strip():
             try:
-                self.mem_rag.append_turn(str(request.session_id), request.query, response_text)
+                self.mem_rag.append_turn(
+                    str(request.session_id),
+                    request.query,
+                    response_text,
+                    query_type=query_type,
+                )
             except Exception as e:
                 logger.warning("Conversation append_turn failed: %s", e)
 
