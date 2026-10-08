@@ -61,7 +61,11 @@ class RAGCacheLite:
         logger.info("RAGCacheLite cleared — existing_items=%d", self._collection.count())
 
     # ─────────────────────────────────────────────────────────────────────────
-    def lookup(self, query: str) -> Optional[str]:
+    def lookup(
+        self,
+        query: str,
+        query_vec: Optional[list[float]] = None,
+    ) -> Optional[str]:
         """
         Search for a semantically near-identical cached query.
 
@@ -74,7 +78,11 @@ class RAGCacheLite:
         if self._collection.count() == 0:
             return None
 
-        query_embedding = self._embed.encode(query).tolist()
+        if query_vec is not None:
+            query_embedding = query_vec
+        else:
+            emb = self._embed.encode(query)
+            query_embedding = emb.tolist() if hasattr(emb, "tolist") else list(emb)
 
         results = self._collection.query(
             query_embeddings=[query_embedding],

@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 import chromadb
 from config.settings import get_settings
+from core.corpus_index import CorpusIndex
 from core.pipeline import Pipeline
 from core.schemas import HealthResponse, QueryRequest, QueryResponse
 from ingestion.code_ingest import ingest_codebase
@@ -40,6 +41,7 @@ _services = {
     "embedding_model": None,
     "pipeline": None,
     "mem_rag": None,
+    "corpus_index": None,
 }
 
 
@@ -85,13 +87,20 @@ def init_services():
     graph_rag = GraphRAG(_services["neo4j_driver"])
     llm_client = LLMClient(settings)
 
-    # 5. Pipeline
+    # 5. Corpus Index
+    corpus_index = CorpusIndex()
+    if _services["neo4j_driver"] is not None:
+        corpus_index.refresh_from_neo4j(_services["neo4j_driver"])
+    _services["corpus_index"] = corpus_index
+
+    # 6. Pipeline
     _services["mem_rag"] = mem_rag
     _services["pipeline"] = Pipeline(
         cache=cache,
         graph_rag=graph_rag,
         mem_rag=mem_rag,
         llm_client=llm_client,
+        corpus_index=corpus_index,
     )
     return _services
 
@@ -169,8 +178,11 @@ async def ingest_code(payload: Optional[IngestCodeRequest] = None, root_path: Op
 
     try:
         summary = ingest_codebase(str(resolved_path), driver)
-        if _services.get("pipeline") and hasattr(_services["pipeline"], "cache"):
-            _services["pipeline"].cache.clear()
+        if _services.get("pipeline"):
+            if hasattr(_services["pipeline"], "cache"):
+                _services["pipeline"].cache.clear()
+            if hasattr(_services["pipeline"], "corpus_index"):
+                _services["pipeline"].corpus_index.refresh_from_neo4j(driver)
         return {"status": "success", "summary": summary}
     except Exception as e:
         logger.error("Failed to ingest codebase: %s", e, exc_info=True)

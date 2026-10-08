@@ -50,8 +50,60 @@ class MemRAG:
         """Access the underlying Chroma collection."""
         return self._collection
 
+    def embed_query(self, query: str) -> list[float]:
+        """Compute query embedding vector using the shared embedding model."""
+        emb = self._embed.encode(query)
+        return emb.tolist() if hasattr(emb, "tolist") else list(emb)
+
     # ─────────────────────────────────────────────────────────────────────────
-    def retrieve(self, query: str, session_id: str, top_k: int = 5) -> list[RetrievedChunk]:
+    def best_document_similarity(
+        self,
+        query: Optional[str] = None,
+        query_vec: Optional[list[float]] = None,
+    ) -> float:
+        """
+        Return the highest cosine similarity between the query and ingested documents.
+        Returns 0.0 if no documents have been ingested or if the probe fails.
+        """
+        try:
+            if self._collection.count() == 0:
+                return 0.0
+
+            if query_vec is None:
+                if not query:
+                    return 0.0
+                query_vec = self.embed_query(query)
+
+            doc_res = self._collection.query(
+                query_embeddings=[query_vec],
+                n_results=1,
+                where={"type": "document"},
+                include=["distances"],
+            )
+
+            if (
+                not doc_res.get("ids")
+                or not doc_res["ids"][0]
+                or not doc_res.get("distances")
+                or not doc_res["distances"][0]
+            ):
+                return 0.0
+
+            dist = doc_res["distances"][0][0]
+            similarity = max(0.0, 1.0 - dist)
+            return float(similarity)
+        except Exception as e:
+            logger.warning("Error calculating best document similarity: %s", e)
+            return 0.0
+
+    # ─────────────────────────────────────────────────────────────────────────
+    def retrieve(
+        self,
+        query: str,
+        session_id: str,
+        top_k: int = 5,
+        query_vec: Optional[list[float]] = None,
+    ) -> list[RetrievedChunk]:
         """
         Retrieve relevant document excerpts and conversation history for this session.
 
@@ -68,6 +120,8 @@ class MemRAG:
             Session identifier for isolating conversation memory.
         top_k : int
             Maximum number of combined chunks to return (default 5).
+        query_vec : list[float], optional
+            Precomputed query embedding vector to avoid redundant model encoding.
 
         Returns
         -------
@@ -77,8 +131,10 @@ class MemRAG:
         if self._collection.count() == 0:
             return []
 
-        query_emb = self._embed.encode(query)
-        emb_list = query_emb.tolist() if hasattr(query_emb, "tolist") else list(query_emb)
+        if query_vec is not None:
+            emb_list = query_vec
+        else:
+            emb_list = self.embed_query(query)
 
         candidates = []
 

@@ -19,6 +19,7 @@ import time
 from uuid import uuid4
 
 from config.settings import get_settings
+from core.corpus_index import CorpusIndex
 from core.query_analyzer import classify
 from core.schemas import QueryRequest, QueryResponse, QueryType, RetrievedChunk
 from modules.cache import RAGCacheLite
@@ -38,6 +39,7 @@ class Pipeline:
         graph_rag: GraphRAG,
         mem_rag: MemRAG,
         llm_client: LLMClient,
+        corpus_index: CorpusIndex | None = None,
     ):
         """
         Parameters
@@ -50,11 +52,14 @@ class Pipeline:
             Document & conversation memory retrieval instance.
         llm_client : LLMClient
             Unified Gemini/Groq LLM client.
+        corpus_index : CorpusIndex, optional
+            Known symbols index for corpus-aware classification.
         """
         self.cache = cache
         self.graph_rag = graph_rag
         self.mem_rag = mem_rag
         self.llm = llm_client
+        self.corpus_index = corpus_index if corpus_index is not None else CorpusIndex()
         self.settings = get_settings()
 
     def handle_query(self, request: QueryRequest) -> QueryResponse:
@@ -73,9 +78,17 @@ class Pipeline:
         """
         start = time.time()
 
+        # Embed once per request to avoid redundant encoding across components
+        query_vec = None
+        try:
+            if hasattr(self.mem_rag, "embed_query"):
+                query_vec = self.mem_rag.embed_query(request.query)
+        except Exception as e:
+            logger.warning("Failed to precompute query embedding: %s", e)
+
         # ── 1. Cache Check ───────────────────────────────────────────────────
         try:
-            cached = self.cache.lookup(request.query)
+            cached = self.cache.lookup(request.query, query_vec=query_vec)
             if cached is not None:
                 # I-02: Record cache hits in conversation memory so full session history is preserved
                 try:
@@ -102,8 +115,26 @@ class Pipeline:
         # ── 2. Classification ────────────────────────────────────────────────
         turn_count = self.mem_rag.session_turn_count(str(request.session_id))
         last_turn = self.mem_rag.last_turn_type(str(request.session_id))
-        query_type = classify(request.query, turn_count, last_turn_type=last_turn)
-        logger.info("Query classified as: %s (turn_count=%d, last_turn=%s)", query_type.value, turn_count, last_turn)
+
+        doc_probe = None
+        if hasattr(self.mem_rag, "best_document_similarity"):
+            doc_probe = lambda: self.mem_rag.best_document_similarity(
+                query=request.query, query_vec=query_vec
+            )
+
+        query_type = classify(
+            request.query,
+            turn_count,
+            known_symbols=self.corpus_index.symbols,
+            doc_similarity_fn=doc_probe,
+            last_turn_type=last_turn,
+        )
+        logger.info(
+            "Query classified as: %s (turn_count=%d, last_turn=%s)",
+            query_type.value,
+            turn_count,
+            last_turn,
+        )
 
         # ── 3. Context Retrieval Branch ──────────────────────────────────────
         chunks: list[RetrievedChunk] = []
@@ -115,6 +146,7 @@ class Pipeline:
                     request.query,
                     str(request.session_id),
                     top_k=self.settings.memory_top_k,
+                    query_vec=query_vec,
                 )
             # SIMPLE: chunks remains empty
         except Exception as e:
