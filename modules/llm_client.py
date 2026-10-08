@@ -9,11 +9,29 @@ API key) in .env — no code changes.
 
 import logging
 
-from openai import OpenAI
+from openai import (
+    OpenAI,
+    APIError,
+    APITimeoutError,
+    APIConnectionError,
+    RateLimitError,
+    AuthenticationError,
+    APIStatusError,
+)
 
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+class LLMServiceError(Exception):
+    """Raised when an external LLM call fails, times out, or returns invalid content."""
+
+    def __init__(self, message: str, status_code: int = 503):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
 
 # ── System prompts per query type ────────────────────────────────────────────
 SYSTEM_PROMPTS: dict[str, str] = {
@@ -44,12 +62,16 @@ class LLMClient:
 
     def __init__(self, settings=None):
         settings = settings or get_settings()
+        self.settings = settings
+        self.provider = settings.llm_provider
 
         if settings.llm_provider == "gemini":
             api_key = settings.gemini_api_key or "placeholder_gemini_key"
             self.client = OpenAI(
                 api_key=api_key,
                 base_url=settings.gemini_base_url,
+                timeout=30.0,
+                max_retries=2,
             )
             self.model = settings.gemini_model
         elif settings.llm_provider == "groq":
@@ -57,6 +79,8 @@ class LLMClient:
             self.client = OpenAI(
                 api_key=api_key,
                 base_url=settings.groq_base_url,
+                timeout=30.0,
+                max_retries=2,
             )
             self.model = settings.groq_model
         else:
@@ -71,6 +95,16 @@ class LLMClient:
             settings.llm_provider,
             self.model,
         )
+
+    def is_configured(self) -> bool:
+        """Return True if the active provider has a valid (non-placeholder) API key."""
+        if self.provider == "gemini":
+            key = self.settings.gemini_api_key
+            return bool(key and key.strip() and key != "placeholder_gemini_key")
+        elif self.provider == "groq":
+            key = self.settings.groq_api_key
+            return bool(key and key.strip() and key != "placeholder_groq_key")
+        return False
 
     def generate(
         self,
@@ -103,11 +137,9 @@ class LLMClient:
         # Build user message — with or without retrieved context (I-11)
         if context_chunks:
             context_text = "\n\n---\n\n".join(context_chunks)
-            # Simple character-based truncation to stay within budget
             context_text = context_text[: self._max_context_chars]
             user_message = f"Context:\n{context_text}\n\nQuestion: {query}"
         else:
-            # When retrieval is empty, omit context block entirely and prompt with fallback note
             if query_type in ("code", "memory"):
                 user_message = (
                     f"Note: No relevant {query_type} context was found in the indexed index.\n\n"
@@ -123,15 +155,79 @@ class LLMClient:
             len(context_chunks or []),
         )
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=0.2,
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                temperature=0.2,
+            )
+        except AuthenticationError as e:
+            logger.error("LLM authentication failed for provider '%s': %s", self.provider, e)
+            raise LLMServiceError(
+                f"LLM authentication failed for provider '{self.provider}'. Check API key.",
+                status_code=503,
+            ) from e
+        except RateLimitError as e:
+            logger.error("LLM rate limit / quota exceeded for provider '%s': %s", self.provider, e)
+            raise LLMServiceError(
+                f"LLM rate limit or quota exceeded for provider '{self.provider}'.",
+                status_code=429,
+            ) from e
+        except APITimeoutError as e:
+            logger.error("LLM request timed out for provider '%s': %s", self.provider, e)
+            raise LLMServiceError(
+                "LLM request timed out after 30 seconds.",
+                status_code=503,
+            ) from e
+        except APIConnectionError as e:
+            logger.error("LLM connection error for provider '%s': %s", self.provider, e)
+            raise LLMServiceError(
+                f"Could not connect to LLM provider '{self.provider}'.",
+                status_code=503,
+            ) from e
+        except APIStatusError as e:
+            err_code = getattr(e, "status_code", 500)
+            logger.error("LLM API status error (%s) for provider '%s': %s", err_code, self.provider, e)
+            status_code = 429 if err_code == 429 else 503
+            raise LLMServiceError(
+                f"LLM provider '{self.provider}' returned error status {err_code}.",
+                status_code=status_code,
+            ) from e
+        except APIError as e:
+            logger.error("LLM API error for provider '%s': %s", self.provider, e)
+            raise LLMServiceError(
+                f"LLM provider '{self.provider}' error: {getattr(e, 'message', str(e))}",
+                status_code=503,
+            ) from e
+        except TimeoutError as e:
+            logger.error("LLM timeout for provider '%s': %s", self.provider, e)
+            raise LLMServiceError(
+                "LLM request timed out.",
+                status_code=503,
+            ) from e
+        except Exception as e:
+            if isinstance(e, LLMServiceError):
+                raise
+            logger.error("Unexpected LLM error for provider '%s': %s", self.provider, e)
+            raise LLMServiceError(
+                f"LLM call failed: {str(e)}",
+                status_code=503,
+            ) from e
 
-        result = response.choices[0].message.content
-        logger.debug("LLM response — length=%d chars", len(result or ""))
-        return result or ""
+        if not response or not getattr(response, "choices", None):
+            raise LLMServiceError("LLM response contained no choices.", status_code=503)
+
+        choice = response.choices[0]
+        finish_reason = getattr(choice, "finish_reason", None)
+        if finish_reason in ("content_filter", "safety"):
+            raise LLMServiceError("LLM response was blocked by safety/content filter.", status_code=503)
+
+        result = choice.message.content
+        if result is None or not result.strip():
+            raise LLMServiceError("LLM returned empty content.", status_code=503)
+
+        logger.debug("LLM response — length=%d chars", len(result))
+        return result

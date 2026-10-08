@@ -47,3 +47,5 @@ class HealthResponse(BaseModel):
     status: str
     neo4j_connected: bool
     chroma_ready: bool
+    llm_configured: bool = Field(default=False)
+

@@ -16,7 +16,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi.responses import JSONResponse
 from neo4j import GraphDatabase
 from pydantic import BaseModel, Field
 
@@ -29,7 +30,7 @@ from ingestion.code_ingest import ingest_codebase
 from ingestion.document_ingest import ingest_document
 from modules.cache import RAGCacheLite
 from modules.graph_rag import GraphRAG
-from modules.llm_client import LLMClient
+from modules.llm_client import LLMClient, LLMServiceError
 from modules.mem_rag import MemRAG
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,7 @@ def init_services():
 
     # 6. Pipeline
     _services["mem_rag"] = mem_rag
+    _services["llm_client"] = llm_client
     _services["pipeline"] = Pipeline(
         cache=cache,
         graph_rag=graph_rag,
@@ -121,6 +123,15 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(LLMServiceError)
+async def llm_service_error_handler(request: Request, exc: LLMServiceError):
+    """Map LLM provider failures to clean JSON status responses without stack traces."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.message},
+    )
 
 
 def get_pipeline() -> Pipeline:
@@ -293,8 +304,16 @@ async def health_check() -> HealthResponse:
 
     overall_status = "ok" if (neo4j_ok and chroma_ok) else "degraded"
 
+    llm_ok = False
+    llm_client = _services.get("llm_client")
+    if llm_client and hasattr(llm_client, "is_configured"):
+        llm_ok = llm_client.is_configured()
+    elif _services.get("pipeline") and hasattr(_services["pipeline"], "llm"):
+        llm_ok = _services["pipeline"].llm.is_configured()
+
     return HealthResponse(
         status=overall_status,
         neo4j_connected=neo4j_ok,
         chroma_ready=chroma_ok,
+        llm_configured=llm_ok,
     )

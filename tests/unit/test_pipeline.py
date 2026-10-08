@@ -181,3 +181,18 @@ def test_empty_chunks_omits_context_block_in_prompt():
     user_msg2 = called_messages2[1]["content"]
     assert "Context:" not in user_msg2
     assert "No relevant code context was found" in user_msg2
+
+
+def test_llm_failure_does_not_cache_or_record_turn(mock_pipeline):
+    """I-13: LLM failure must propagate and leave zero traces in cache or memory."""
+    from modules.llm_client import LLMServiceError
+    pipe, mock_cache, _, mock_mem_rag, mock_llm = mock_pipeline
+    mock_llm.generate.side_effect = LLMServiceError("Service unavailable", status_code=503)
+
+    req = QueryRequest(query="What is the capital of France?")
+    with pytest.raises(LLMServiceError):
+        pipe.handle_query(req)
+
+    mock_cache.store.assert_not_called()
+    mock_mem_rag.append_turn.assert_not_called()
+

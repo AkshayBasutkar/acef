@@ -161,3 +161,25 @@ def test_health_check(client):
     assert "status" in data
     assert "neo4j_connected" in data
     assert "chroma_ready" in data
+    assert "llm_configured" in data
+
+
+def test_query_llm_service_error_maps_to_503(client):
+    from modules.llm_client import LLMServiceError
+    test_client, mock_pipe, _ = client
+    mock_pipe.handle_query.side_effect = LLMServiceError("Service unavailable", status_code=503)
+
+    response = test_client.post("/query", json={"query": "test query", "session_id": str(uuid4())})
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Service unavailable"}
+
+
+def test_query_llm_rate_limit_maps_to_429(client):
+    from modules.llm_client import LLMServiceError
+    test_client, mock_pipe, _ = client
+    mock_pipe.handle_query.side_effect = LLMServiceError("Rate limit exceeded", status_code=429)
+
+    response = test_client.post("/query", json={"query": "test query", "session_id": str(uuid4())})
+    assert response.status_code == 429
+    assert response.json() == {"detail": "Rate limit exceeded"}
+
