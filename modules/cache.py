@@ -12,11 +12,55 @@ once at the app level and passed in — never reloaded here).
 """
 
 import logging
+import re
 from typing import Optional
 
 from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def extract_salient_tokens(text: str) -> set[str]:
+    """
+    Extract salient tokens (digits/numbers, quoted strings, and capitalized words
+    not at the start of a sentence) from a query string.
+
+    Parameters
+    ----------
+    text : str
+        Input query text.
+
+    Returns
+    -------
+    set[str]
+        Set of normalized salient tokens.
+    """
+    salient: set[str] = set()
+
+    # 1. Digits and numbers
+    for num in re.findall(r"\b\d+(?:\.\d+)?\b", text):
+        salient.add(num)
+
+    # 2. Quoted strings (single, double, or backticks)
+    for quoted in re.findall(r"[\"'\`]([^\"'\`]+)[\"'\`]", text):
+        cleaned = quoted.strip().lower()
+        if cleaned:
+            salient.add(f"quote:{cleaned}")
+
+    # 3. Capitalised words not at the start of a sentence
+    # Split text into sentence segments
+    sentences = re.split(r"[.?!]\s*", text)
+    for sent in sentences:
+        words = re.findall(r"\b[A-Za-z0-9_'\-]+\b", sent)
+        if not words:
+            continue
+        # Skip the first word of the sentence
+        for w in words[1:]:
+            clean_w = w.rstrip("'s").strip("'\"-_")
+            if clean_w and clean_w[0].isupper():
+                salient.add(clean_w.lower())
+
+    return salient
 
 
 class RAGCacheLite:
@@ -87,10 +131,10 @@ class RAGCacheLite:
         results = self._collection.query(
             query_embeddings=[query_embedding],
             n_results=1,
-            include=["documents", "distances"],
+            include=["documents", "distances", "metadatas"],
         )
 
-        # results shape: {"ids": [[...]], "documents": [[...]], "distances": [[...]]}
+        # results shape: {"ids": [[...]], "documents": [[...]], "distances": [[...]], "metadatas": [[...]]}
         if not results["ids"] or not results["ids"][0]:
             return None
 
@@ -98,6 +142,22 @@ class RAGCacheLite:
         similarity = 1.0 - distance
 
         if similarity >= self._threshold:
+            # I-06 Salient-token guard: prevent confident wrong answers on entity/number swaps
+            metas = results.get("metadatas", [[]])
+            cached_query = metas[0][0].get("query", "") if (metas and metas[0] and isinstance(metas[0][0], dict)) else ""
+            if cached_query:
+                tokens_curr = extract_salient_tokens(query)
+                tokens_cached = extract_salient_tokens(cached_query)
+                if tokens_curr != tokens_cached:
+                    logger.info(
+                        "Cache miss (salient guard) — similarity=%.4f >= %.3f, but salient tokens mismatch: %s vs %s",
+                        similarity,
+                        self._threshold,
+                        tokens_curr,
+                        tokens_cached,
+                    )
+                    return None
+
             cached_response = results["documents"][0][0]
             logger.info(
                 "Cache HIT — similarity=%.4f (threshold=%.3f)",

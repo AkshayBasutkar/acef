@@ -84,3 +84,67 @@ def test_cache_lookup_miss_below_threshold(mock_cache_setup):
     cache = RAGCacheLite(mock_chroma, mock_embed)
     result = cache.lookup("What is German capital?")
     assert result is None
+
+
+def test_extract_salient_tokens():
+    from modules.cache import extract_salient_tokens
+
+    # Numbers
+    assert extract_salient_tokens("Give me 3 tips and 42 tricks") == {"3", "42"}
+
+    # Quoted strings
+    assert extract_salient_tokens("Inspect 'auth.py' and `main`") == {"quote:auth.py", "quote:main"}
+
+    # Capitalized words not at start of sentence
+    t = extract_salient_tokens("What is the capital of France? Tell me.")
+    assert "france" in t
+    assert "what" not in t  # Start of first sentence
+    assert "tell" not in t  # Start of second sentence
+
+
+def test_salient_guard_rejects_entity_swap(mock_cache_setup):
+    """Even if similarity is 0.98, France vs Germany must be rejected as a miss."""
+    mock_chroma, mock_col, mock_embed = mock_cache_setup
+    mock_col.count.return_value = 1
+    mock_col.query.return_value = {
+        "ids": [["q-123"]],
+        "documents": [["Paris is the capital of France."]],
+        "distances": [[0.02]],  # similarity 0.98 >= 0.92
+        "metadatas": [[{"query": "What is the capital of Germany?", "query_type": "simple"}]],
+    }
+
+    cache = RAGCacheLite(mock_chroma, mock_embed)
+    result = cache.lookup("What is the capital of France?")
+    assert result is None  # Guard treated it as a miss!
+
+
+def test_salient_guard_rejects_number_swap(mock_cache_setup):
+    """Even if similarity is 0.98, 3 tips vs 5 tips must be rejected as a miss."""
+    mock_chroma, mock_col, mock_embed = mock_cache_setup
+    mock_col.count.return_value = 1
+    mock_col.query.return_value = {
+        "ids": [["q-123"]],
+        "documents": [["Here are 5 tips..."]],
+        "distances": [[0.02]],  # similarity 0.98 >= 0.92
+        "metadatas": [[{"query": "Give me 5 tips for a job interview.", "query_type": "simple"}]],
+    }
+
+    cache = RAGCacheLite(mock_chroma, mock_embed)
+    result = cache.lookup("Give me 3 tips for a job interview.")
+    assert result is None  # Guard treated it as a miss!
+
+
+def test_salient_guard_accepts_paraphrase_with_same_salient_tokens(mock_cache_setup):
+    """Paraphrases sharing identical salient tokens hit the cache."""
+    mock_chroma, mock_col, mock_embed = mock_cache_setup
+    mock_col.count.return_value = 1
+    mock_col.query.return_value = {
+        "ids": [["q-123"]],
+        "documents": [["Paris is the capital of France."]],
+        "distances": [[0.02]],  # similarity 0.98 >= 0.92
+        "metadatas": [[{"query": "Which city is France's capital?", "query_type": "simple"}]],
+    }
+
+    cache = RAGCacheLite(mock_chroma, mock_embed)
+    result = cache.lookup("What is the capital of France?")
+    assert result == "Paris is the capital of France."

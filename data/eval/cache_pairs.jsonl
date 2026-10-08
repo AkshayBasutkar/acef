@@ -1,0 +1,32 @@
+{"a": "What is the capital of France?", "b": "Which city is France's capital?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "Explain how photosynthesis works.", "b": "Can you explain the process of photosynthesis?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "Give me three tips for a job interview.", "b": "What are 3 tips for doing well in an interview?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "How many ounces are in a pound?", "b": "How many ounces in 1 pound?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "Write a short poem about the monsoon.", "b": "Compose a brief poem about monsoon rains.", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "What is the distance to the moon?", "b": "How far away is the moon from Earth?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "Tell me a joke about computers.", "b": "Can you tell a computer joke?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "Who wrote Hamlet?", "b": "Which author wrote the play Hamlet?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "What causes earthquakes?", "b": "Why do earthquakes happen?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "What is the boiling point of water in Celsius?", "b": "At what temperature Celsius does water boil?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "How do airplanes fly?", "b": "Can you explain how planes stay in the air?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "What is the speed of light?", "b": "How fast does light travel?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "Who was the first president of the United States?", "b": "Who was America's first president?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "How many continents are there?", "b": "What is the total number of continents on Earth?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "What is the currency of Japan?", "b": "Which currency is used in Japan?", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "How does GPS work?", "b": "Explain how GPS navigation works.", "label": "paraphrase", "kind": "paraphrase"}
+{"a": "What is the capital of France?", "b": "What is the capital of Germany?", "label": "different", "kind": "entity_swap"}
+{"a": "Who founded Microsoft?", "b": "Who founded Apple?", "label": "different", "kind": "entity_swap"}
+{"a": "What is the currency of Japan?", "b": "What is the currency of China?", "label": "different", "kind": "entity_swap"}
+{"a": "Tell me about the history of Rome.", "b": "Tell me about the history of Athens.", "label": "different", "kind": "entity_swap"}
+{"a": "What is the population of Canada?", "b": "What is the population of Australia?", "label": "different", "kind": "entity_swap"}
+{"a": "Who wrote Hamlet?", "b": "Who wrote Macbeth?", "label": "different", "kind": "entity_swap"}
+{"a": "Give me 3 tips for a job interview.", "b": "Give me 5 tips for a job interview.", "label": "different", "kind": "number_swap"}
+{"a": "How many ounces are in 1 pound?", "b": "How many ounces are in 2 pounds?", "label": "different", "kind": "number_swap"}
+{"a": "What happened in the year 1914?", "b": "What happened in the year 1939?", "label": "different", "kind": "number_swap"}
+{"a": "List 10 healthy fruits.", "b": "List 20 healthy fruits.", "label": "different", "kind": "number_swap"}
+{"a": "How many days are in 4 weeks?", "b": "How many days are in 6 weeks?", "label": "different", "kind": "number_swap"}
+{"a": "How do I enable dark mode?", "b": "How do I disable dark mode?", "label": "different", "kind": "antonym"}
+{"a": "Should I turn on automatic updates?", "b": "Should I turn off automatic updates?", "label": "different", "kind": "antonym"}
+{"a": "How to start a background service?", "b": "How to stop a background service?", "label": "different", "kind": "antonym"}
+{"a": "Why did the stock market rise today?", "b": "Why did the stock market fall today?", "label": "different", "kind": "antonym"}
+{"a": "How to increase video playback speed?", "b": "How to decrease video playback speed?", "label": "different", "kind": "antonym"}
