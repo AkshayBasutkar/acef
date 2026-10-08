@@ -169,6 +169,8 @@ async def ingest_code(payload: Optional[IngestCodeRequest] = None, root_path: Op
 
     try:
         summary = ingest_codebase(str(resolved_path), driver)
+        if _services.get("pipeline") and hasattr(_services["pipeline"], "cache"):
+            _services["pipeline"].cache.clear()
         return {"status": "success", "summary": summary}
     except Exception as e:
         logger.error("Failed to ingest codebase: %s", e, exc_info=True)
@@ -210,6 +212,8 @@ async def ingest_doc(file: UploadFile = File(...)) -> dict:
             chroma_collection=mem_rag.collection,
             embedding_model=embed_model,
         )
+        if _services.get("pipeline") and hasattr(_services["pipeline"], "cache"):
+            _services["pipeline"].cache.clear()
         return {
             "status": "success",
             "filename": file.filename,

@@ -86,7 +86,8 @@ def test_code_query_flow(mock_pipeline):
         query_type="code",
         context_chunks=["def login(): ..."],
     )
-    mock_cache.store.assert_called_once()
+    # I-01: CODE answers depend on codebase state and are never cached
+    mock_cache.store.assert_not_called()
     mock_mem_rag.append_turn.assert_not_called()
 
 
@@ -108,8 +109,17 @@ def test_memory_query_flow(mock_pipeline):
         query_type="memory",
         context_chunks=["Tier 1: Free"],
     )
-    mock_cache.store.assert_called_once()
+    # I-01: MEMORY answers depend on session/document state and are never cached
+    mock_cache.store.assert_not_called()
     mock_mem_rag.append_turn.assert_called_once_with(str(sess_id), req.query, "Mock LLM answer")
+
+
+def test_empty_llm_response_not_cached(mock_pipeline):
+    pipe, mock_cache, _, _, mock_llm = mock_pipeline
+    mock_llm.generate.return_value = "   "
+    req = QueryRequest(query="What is 2 + 2?")
+    res = pipe.handle_query(req)
+    mock_cache.store.assert_not_called()
 
 
 def test_retrieval_exception_gracefully_degrades(mock_pipeline):

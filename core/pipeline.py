@@ -120,10 +120,12 @@ class Pipeline:
 
         # ── 5. Write-back ────────────────────────────────────────────────────
         query_id = str(uuid4())
-        try:
-            self.cache.store(request.query, response_text, query_id)
-        except Exception as e:
-            logger.warning("Cache store failed: %s", e)
+        # I-01: Cache only SIMPLE answers; CODE and MEMORY answers depend on state
+        if query_type == QueryType.SIMPLE and response_text and response_text.strip():
+            try:
+                self.cache.store(request.query, response_text, query_id)
+            except Exception as e:
+                logger.warning("Cache store failed: %s", e)
 
         if query_type == QueryType.MEMORY:
             try:

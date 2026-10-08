@@ -31,6 +31,7 @@ class RAGCacheLite:
         embedding_model : sentence_transformers.SentenceTransformer
             Shared embedding model — loaded ONCE at app level.
         """
+        self._chroma_client = chroma_client
         self._collection = chroma_client.get_or_create_collection(
             name="cache",
             metadata={"hnsw:space": "cosine"},
@@ -42,6 +43,22 @@ class RAGCacheLite:
             self._threshold,
             self._collection.count(),
         )
+
+    def count(self) -> int:
+        """Return the number of items stored in the cache."""
+        return self._collection.count()
+
+    def clear(self) -> None:
+        """Clear all entries from the cache collection by recreating it."""
+        try:
+            self._chroma_client.delete_collection(name="cache")
+        except Exception as e:
+            logger.debug("delete_collection on clear: %s", e)
+        self._collection = self._chroma_client.get_or_create_collection(
+            name="cache",
+            metadata={"hnsw:space": "cosine"},
+        )
+        logger.info("RAGCacheLite cleared — existing_items=%d", self._collection.count())
 
     # ─────────────────────────────────────────────────────────────────────────
     def lookup(self, query: str) -> Optional[str]:
@@ -103,6 +120,6 @@ class RAGCacheLite:
             ids=[query_id],
             embeddings=[query_embedding],
             documents=[response],
-            metadatas=[{"query": query}],
+            metadatas=[{"query": query, "query_type": "simple"}],
         )
         logger.debug("Cached response for query_id=%s", query_id)
