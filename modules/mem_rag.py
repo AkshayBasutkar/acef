@@ -271,9 +271,11 @@ class MemRAG:
             metas = res.get("metadatas", [])
             if not metas:
                 return None
-
-            latest = max(metas, key=lambda m: m.get("timestamp", 0))
-            raw_type = latest.get("query_type", "simple")
+            try:
+                latest = max(metas, key=lambda m: (m.get("timestamp", 0) if isinstance(m, dict) else 0))
+            except (ValueError, TypeError):
+                return None
+            raw_type = latest.get("query_type", "simple") if isinstance(latest, dict) else "simple"
             try:
                 return QueryType(raw_type)
             except ValueError:
