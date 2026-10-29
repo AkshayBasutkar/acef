@@ -13,6 +13,7 @@ once at the app level and passed in — never reloaded here).
 
 import logging
 import re
+import threading
 from typing import Optional
 
 from config.settings import get_settings
@@ -82,6 +83,7 @@ class RAGCacheLite:
         )
         self._embed = embedding_model
         self._threshold = get_settings().cache_similarity_threshold
+        self._lock = threading.Lock()
         logger.info(
             "RAGCacheLite ready — threshold=%.3f  existing_items=%d",
             self._threshold,
@@ -94,14 +96,15 @@ class RAGCacheLite:
 
     def clear(self) -> None:
         """Clear all entries from the cache collection by recreating it."""
-        try:
-            self._chroma_client.delete_collection(name="cache")
-        except Exception as e:
-            logger.debug("delete_collection on clear: %s", e)
-        self._collection = self._chroma_client.get_or_create_collection(
-            name="cache",
-            metadata={"hnsw:space": "cosine"},
-        )
+        with self._lock:
+            try:
+                self._chroma_client.delete_collection(name="cache")
+            except Exception as e:
+                logger.debug("delete_collection on clear: %s", e)
+            self._collection = self._chroma_client.get_or_create_collection(
+                name="cache",
+                metadata={"hnsw:space": "cosine"},
+            )
         logger.info("RAGCacheLite cleared — existing_items=%d", self._collection.count())
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -184,10 +187,11 @@ class RAGCacheLite:
         """
         query_embedding = self._embed.encode(query).tolist()
 
-        self._collection.add(
-            ids=[query_id],
-            embeddings=[query_embedding],
-            documents=[response],
-            metadatas=[{"query": query, "query_type": "simple"}],
-        )
+        with self._lock:
+            self._collection.add(
+                ids=[query_id],
+                embeddings=[query_embedding],
+                documents=[response],
+                metadatas=[{"query": query, "query_type": "simple"}],
+            )
         logger.debug("Cached response for query_id=%s", query_id)

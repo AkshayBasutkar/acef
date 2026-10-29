@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from neo4j import GraphDatabase
 from pydantic import BaseModel, Field
 
@@ -32,6 +34,7 @@ from modules.cache import RAGCacheLite
 from modules.graph_rag import GraphRAG
 from modules.llm_client import LLMClient, LLMServiceError
 from modules.mem_rag import MemRAG
+from core.classifier import get_classifier
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +97,11 @@ def init_services():
         corpus_index.refresh_from_neo4j(_services["neo4j_driver"])
     _services["corpus_index"] = corpus_index
 
-    # 6. Pipeline
+    # 6. Classifier — mode controlled by CLASSIFIER_MODE in .env
+    classifier = get_classifier(settings, llm_client)
+    logger.info("Query classifier mode: %s", settings.classifier_mode)
+
+    # 7. Pipeline
     _services["mem_rag"] = mem_rag
     _services["llm_client"] = llm_client
     _services["pipeline"] = Pipeline(
@@ -103,6 +110,7 @@ def init_services():
         mem_rag=mem_rag,
         llm_client=llm_client,
         corpus_index=corpus_index,
+        classifier=classifier,
     )
     return _services
 
@@ -134,6 +142,80 @@ async def llm_service_error_handler(request: Request, exc: LLMServiceError):
     )
 
 
+# ── Static UI Assets & Dashboard Route ────────────────────────────────────────
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/", summary="ACEF Web Studio Dashboard", include_in_schema=False)
+async def serve_dashboard():
+    """Serve the interactive web UI dashboard."""
+    index_file = STATIC_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    return {"message": "ACEF API Gateway is running. Interactive UI not found."}
+
+
+@app.get("/graph/data", summary="Get Code Knowledge Graph Data")
+async def get_graph_data():
+    """Return nodes and edges from Neo4j for frontend graph visualization."""
+    if _services.get("neo4j_driver") is None:
+        init_services()
+    driver = _services.get("neo4j_driver")
+    if not driver:
+        return {"nodes": [], "links": [], "error": "Neo4j driver not connected"}
+
+    def _fetch():
+        nodes_dict = {}
+        links = []
+        try:
+            with driver.session() as session:
+                result = session.run("""
+                    MATCH (n)
+                    RETURN elementId(n) AS id, labels(n) AS labels, properties(n) AS props
+                """)
+                for record in result:
+                    nid = str(record["id"])
+                    labels = record["labels"] or []
+                    props = record["props"] or {}
+                    node_type = labels[0] if labels else "Unknown"
+                    name = props.get("name") or props.get("path") or nid
+                    if node_type == "File":
+                        name = Path(str(name)).name
+                    nodes_dict[nid] = {
+                        "id": nid,
+                        "name": str(name),
+                        "type": node_type,
+                        "kind": props.get("kind", node_type.lower()),
+                        "docstring": props.get("docstring", ""),
+                        "file_path": props.get("file_path", props.get("path", "")),
+                        "lineno": props.get("lineno", 0),
+                        "source": props.get("source", ""),
+                    }
+
+                rel_result = session.run("""
+                    MATCH (a)-[r]->(b)
+                    RETURN elementId(a) AS source, elementId(b) AS target, type(r) AS type
+                """)
+                for record in rel_result:
+                    src = str(record["source"])
+                    tgt = str(record["target"])
+                    if src in nodes_dict and tgt in nodes_dict:
+                        links.append({
+                            "source": src,
+                            "target": tgt,
+                            "type": record["type"],
+                        })
+
+            return {"nodes": list(nodes_dict.values()), "links": links}
+        except Exception as e:
+            logger.error("Failed to fetch graph data: %s", e)
+            return {"nodes": [], "links": [], "error": str(e)}
+
+    return await run_in_threadpool(_fetch)
+
+
 def get_pipeline() -> Pipeline:
     """Dependency helper returning the Pipeline singleton."""
     if _services["pipeline"] is None:
@@ -160,7 +242,7 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
     Empty queries (<1 char) or oversized queries (>4096 chars) return 422 automatically.
     """
     pipeline = get_pipeline()
-    return pipeline.handle_query(request)
+    return await run_in_threadpool(pipeline.handle_query, request)
 
 
 @app.post("/ingest/code", summary="Ingest Python Codebase")
@@ -179,15 +261,16 @@ async def ingest_code(payload: Optional[IngestCodeRequest] = None, root_path: Op
     resolved_path = Path(path_to_ingest).resolve()
 
     # I-10: Path traversal and root allowlist validation
-    allowed_roots = [Path(p).resolve() for p in settings.allowed_ingest_roots]
-    is_allowed = any(
-        resolved_path == r or r in resolved_path.parents for r in allowed_roots
-    )
-    if not is_allowed:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Path '{path_to_ingest}' is outside allowed ingest roots: {settings.allowed_ingest_roots}",
+    if "*" not in settings.allowed_ingest_roots and settings.allowed_ingest_roots:
+        allowed_roots = [Path(p).resolve() for p in settings.allowed_ingest_roots]
+        is_allowed = any(
+            resolved_path == r or r in resolved_path.parents for r in allowed_roots
         )
+        if not is_allowed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Path '{path_to_ingest}' is outside allowed ingest roots: {settings.allowed_ingest_roots}",
+            )
 
     if not resolved_path.is_dir():
         raise HTTPException(
@@ -201,13 +284,24 @@ async def ingest_code(payload: Optional[IngestCodeRequest] = None, root_path: Op
         driver = _services.get("neo4j_driver")
 
     try:
-        summary = ingest_codebase(str(resolved_path), driver)
-        if _services.get("pipeline"):
-            if hasattr(_services["pipeline"], "cache"):
-                _services["pipeline"].cache.clear()
-            if hasattr(_services["pipeline"], "corpus_index"):
-                _services["pipeline"].corpus_index.refresh_from_neo4j(driver)
-        return {"status": "success", "summary": summary}
+        def _execute_code_ingest():
+            summary = ingest_codebase(str(resolved_path), driver)
+            if _services.get("pipeline"):
+                if hasattr(_services["pipeline"], "cache"):
+                    _services["pipeline"].cache.clear()
+                if hasattr(_services["pipeline"], "corpus_index"):
+                    _services["pipeline"].corpus_index.refresh_from_neo4j(driver)
+            return summary
+
+        summary = await run_in_threadpool(_execute_code_ingest)
+        skipped_count = summary.get("skipped_non_python", 0)
+        skipped_exts = summary.get("skipped_extensions", [])
+        msg = f"Ingested {summary.get('files', 0)} Python files."
+        if skipped_count > 0:
+            ext_str = f" ({', '.join(skipped_exts)})" if skipped_exts else ""
+            msg += f" Skipped {skipped_count} non-Python file{'s' if skipped_count != 1 else ''}{ext_str}."
+
+        return {"status": "success", "message": msg, "summary": summary}
     except Exception as e:
         logger.error("Failed to ingest codebase: %s", e, exc_info=True)
         raise HTTPException(
@@ -256,13 +350,17 @@ async def ingest_doc(file: UploadFile = File(...)) -> dict:
         mem_rag = _services["mem_rag"]
         embed_model = _get_embedding_model()
 
-        chunk_count = ingest_document(
-            file_path=str(tmp_path),
-            chroma_collection=mem_rag.collection,
-            embedding_model=embed_model,
-        )
-        if _services.get("pipeline") and hasattr(_services["pipeline"], "cache"):
-            _services["pipeline"].cache.clear()
+        def _execute_doc_ingest():
+            chunk_count = ingest_document(
+                file_path=str(tmp_path),
+                chroma_collection=mem_rag.collection,
+                embedding_model=embed_model,
+            )
+            if _services.get("pipeline") and hasattr(_services["pipeline"], "cache"):
+                _services["pipeline"].cache.clear()
+            return chunk_count
+
+        chunk_count = await run_in_threadpool(_execute_doc_ingest)
         return {
             "status": "success",
             "filename": file.filename,
@@ -281,39 +379,42 @@ async def health_check() -> HealthResponse:
     """
     Verify Neo4j connectivity and ChromaDB readiness.
     """
-    neo4j_ok = False
-    driver = _services.get("neo4j_driver")
-    if driver:
-        try:
-            with driver.session() as session:
-                result = session.run("RETURN 1 AS ping").single()
-                if result and result["ping"] == 1:
-                    neo4j_ok = True
-        except Exception:
-            neo4j_ok = False
+    def _execute_health():
+        neo4j_ok = False
+        driver = _services.get("neo4j_driver")
+        if driver:
+            try:
+                with driver.session() as session:
+                    result = session.run("RETURN 1 AS ping").single()
+                    if result and result["ping"] == 1:
+                        neo4j_ok = True
+            except Exception:
+                neo4j_ok = False
 
-    chroma_ok = False
-    chroma_client = _services.get("chroma_client")
-    if chroma_client:
-        try:
-            # PersistentClient heartbeat check
-            chroma_client.heartbeat()
-            chroma_ok = True
-        except Exception:
-            chroma_ok = False
+        chroma_ok = False
+        chroma_client = _services.get("chroma_client")
+        if chroma_client:
+            try:
+                # PersistentClient heartbeat check
+                chroma_client.heartbeat()
+                chroma_ok = True
+            except Exception:
+                chroma_ok = False
 
-    overall_status = "ok" if (neo4j_ok and chroma_ok) else "degraded"
+        overall_status = "ok" if (neo4j_ok and chroma_ok) else "degraded"
 
-    llm_ok = False
-    llm_client = _services.get("llm_client")
-    if llm_client and hasattr(llm_client, "is_configured"):
-        llm_ok = llm_client.is_configured()
-    elif _services.get("pipeline") and hasattr(_services["pipeline"], "llm"):
-        llm_ok = _services["pipeline"].llm.is_configured()
+        llm_ok = False
+        llm_client = _services.get("llm_client")
+        if llm_client and hasattr(llm_client, "is_configured"):
+            llm_ok = llm_client.is_configured()
+        elif _services.get("pipeline") and hasattr(_services["pipeline"], "llm"):
+            llm_ok = _services["pipeline"].llm.is_configured()
 
-    return HealthResponse(
-        status=overall_status,
-        neo4j_connected=neo4j_ok,
-        chroma_ready=chroma_ok,
-        llm_configured=llm_ok,
-    )
+        return HealthResponse(
+            status=overall_status,
+            neo4j_connected=neo4j_ok,
+            chroma_ready=chroma_ok,
+            llm_configured=llm_ok,
+        )
+
+    return await run_in_threadpool(_execute_health)

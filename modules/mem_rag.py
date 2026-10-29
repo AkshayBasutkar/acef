@@ -14,6 +14,7 @@ once at the app level and passed in).
 """
 
 import logging
+import threading
 import time
 import uuid
 from typing import Optional
@@ -43,6 +44,7 @@ class MemRAG:
             metadata={"hnsw:space": "cosine"},
         )
         self._embed = embedding_model
+        self._lock = threading.Lock()
         settings = get_settings()
         self._relevance_floor = relevance_floor if relevance_floor is not None else getattr(settings, "memory_relevance_floor", 0.30)
         logger.info(
@@ -241,17 +243,18 @@ class MemRAG:
         raw_emb = self._embed.encode(turn_text)
         emb_list = raw_emb.tolist() if hasattr(raw_emb, "tolist") else list(raw_emb)
 
-        self._collection.add(
-            ids=[turn_id],
-            embeddings=[emb_list],
-            documents=[turn_text],
-            metadatas=[{
-                "type": "conversation",
-                "session_id": str(session_id),
-                "query_type": str(query_type),
-                "timestamp": time.time(),
-            }],
-        )
+        with self._lock:
+            self._collection.add(
+                ids=[turn_id],
+                embeddings=[emb_list],
+                documents=[turn_text],
+                metadatas=[{
+                    "type": "conversation",
+                    "session_id": str(session_id),
+                    "query_type": str(query_type),
+                    "timestamp": time.time(),
+                }],
+            )
         logger.debug(
             "Appended turn for session_id=%s (turn_id=%s, type=%s)",
             session_id, turn_id, query_type,

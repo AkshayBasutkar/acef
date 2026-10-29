@@ -3,12 +3,16 @@ Unit tests for Pipeline orchestration (core/pipeline.py).
 
 Verifies the 5-step lifecycle, caching branch, classification branching,
 graceful error handling, and memory write-back.
+
+The classifier is explicitly injected as a MagicMock in each fixture so that
+pipeline tests are decoupled from classifier implementation details.
 """
 
 from unittest.mock import MagicMock
 from uuid import uuid4
 import pytest
 
+from core.classifier import HeuristicClassifier
 from core.pipeline import Pipeline
 from core.schemas import QueryRequest, QueryResponse, QueryType, RetrievedChunk
 
@@ -23,13 +27,19 @@ def mock_pipeline():
     # Defaults
     mock_cache.lookup.return_value = None
     mock_mem_rag.session_turn_count.return_value = 0
+    mock_mem_rag.last_turn_type.return_value = None
     mock_llm.generate.return_value = "Mock LLM answer"
+
+    # Inject a real HeuristicClassifier so pipeline tests are independent of
+    # LLM availability and classifier_mode config.
+    heuristic = HeuristicClassifier()
 
     pipe = Pipeline(
         cache=mock_cache,
         graph_rag=mock_graph_rag,
         mem_rag=mock_mem_rag,
         llm_client=mock_llm,
+        classifier=heuristic,
     )
     return pipe, mock_cache, mock_graph_rag, mock_mem_rag, mock_llm
 

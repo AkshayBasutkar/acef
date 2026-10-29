@@ -3,7 +3,7 @@ Pipeline Orchestration — the central flow connecting cache, classifier, retrie
 
 Executes the 5 steps:
   1. Cache check (RAGCacheLite) -> return if hit
-  2. Query classification (query_analyzer.classify) -> SIMPLE, CODE, MEMORY
+  2. Query classification (heuristic or LLM via core.classifier) -> SIMPLE, CODE, MEMORY
   3. Context retrieval branch:
      - CODE -> GraphRAG (Neo4j)
      - MEMORY -> MemRAG (Chroma)
@@ -11,7 +11,10 @@ Executes the 5 steps:
   4. Call LLM (Gemini or Groq) with retrieved chunks
   5. Write-back:
      - Store in cache
-     - If MEMORY, append turn to session history
+     - Append turn to session history
+
+The active classifier backend is controlled by settings.classifier_mode:
+  "heuristic" (default) | "llm" | "local"
 """
 
 import logging
@@ -19,8 +22,8 @@ import time
 from uuid import uuid4
 
 from config.settings import get_settings
+from core.classifier import ClassificationContext, get_classifier
 from core.corpus_index import CorpusIndex
-from core.query_analyzer import classify
 from core.schemas import QueryRequest, QueryResponse, QueryType, RetrievedChunk
 from modules.cache import RAGCacheLite
 from modules.graph_rag import GraphRAG
@@ -40,6 +43,7 @@ class Pipeline:
         mem_rag: MemRAG,
         llm_client: LLMClient,
         corpus_index: CorpusIndex | None = None,
+        classifier=None,
     ):
         """
         Parameters
@@ -54,6 +58,9 @@ class Pipeline:
             Unified Gemini/Groq LLM client.
         corpus_index : CorpusIndex, optional
             Known symbols index for corpus-aware classification.
+        classifier : HeuristicClassifier | LLMClassifier | LocalClassifier, optional
+            Query classifier backend. If None, one is created from settings
+            (classifier_mode). Inject explicitly in tests for determinism.
         """
         self.cache = cache
         self.graph_rag = graph_rag
@@ -61,6 +68,9 @@ class Pipeline:
         self.llm = llm_client
         self.corpus_index = corpus_index if corpus_index is not None else CorpusIndex()
         self.settings = get_settings()
+        self.classifier = classifier if classifier is not None else get_classifier(
+            self.settings, llm_client
+        )
 
     def handle_query(self, request: QueryRequest) -> QueryResponse:
         """
@@ -122,16 +132,17 @@ class Pipeline:
                 query=request.query, query_vec=query_vec
             )
 
-        query_type = classify(
-            request.query,
-            turn_count,
+        ctx = ClassificationContext(
+            session_turn_count=turn_count,
             known_symbols=self.corpus_index.symbols,
             doc_similarity_fn=doc_probe,
             last_turn_type=last_turn,
         )
+        query_type = self.classifier.classify(request.query, ctx)
         logger.info(
-            "Query classified as: %s (turn_count=%d, last_turn=%s)",
+            "Query classified as: %s (mode=%s, turn_count=%d, last_turn=%s)",
             query_type.value,
+            self.settings.classifier_mode,
             turn_count,
             last_turn,
         )

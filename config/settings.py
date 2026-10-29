@@ -51,8 +51,27 @@ class Settings(BaseSettings):
     # ── Demo ─────────────────────────────────────────────────────────────────
     demo_codebase_path: str = "./data/demo_codebase"
 
+    # ── Query Classifier ─────────────────────────────────────────────────────
+    # classifier_mode: "heuristic" | "llm" | "local"
+    #   heuristic  — deterministic regex heuristics (default, zero latency)
+    #   llm        — lightweight LLM call for better accuracy; falls back to
+    #                heuristic on any failure
+    #   local      — reserved for a locally-deployed fine-tuned MiniLM
+    classifier_mode: str = "heuristic"
+
+    # Model to use for the LLM classifier. Defaults to a lightweight model
+    # appropriate for the configured llm_provider:
+    #   gemini  → gemini-2.0-flash-lite
+    #   groq    → llama-3.1-8b-instant
+    # Set explicitly to override (e.g. "gemma2-9b-it").
+    classifier_model: str = ""
+
+    # Path to a fine-tuned local classifier model file (ONNX / PyTorch).
+    # Only used when classifier_mode = "local".
+    classifier_local_model_path: str = ""
+
     # ── Ingest Limits & Safety (I-10) ─────────────────────────────────────────
-    allowed_ingest_roots: list[str] = ["./data"]
+    allowed_ingest_roots: list[str] = ["*"]     # ["*"] allows any path, or specify paths like ["./data"]
     max_upload_bytes: int = 10_485_760          # 10 MB limit for document uploads
 
 

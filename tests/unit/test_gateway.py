@@ -70,8 +70,11 @@ def test_query_missing_field_validation_error(client):
     assert response.status_code == 422
 
 
-def test_ingest_code_outside_allowed_roots_returns_400(client):
+def test_ingest_code_outside_allowed_roots_returns_400(client, monkeypatch):
     test_client, _, _ = client
+    from config.settings import get_settings
+    settings = get_settings()
+    monkeypatch.setattr(settings, "allowed_ingest_roots", ["./data"])
     # Path escaping allowed roots
     response = test_client.post(
         "/ingest/code",
@@ -182,4 +185,82 @@ def test_query_llm_rate_limit_maps_to_429(client):
     response = test_client.post("/query", json={"query": "test query", "session_id": str(uuid4())})
     assert response.status_code == 429
     assert response.json() == {"detail": "Rate limit exceeded"}
+
+
+def test_concurrent_queries_run_in_parallel_in_threadpool(client):
+    """I-14: Five concurrent requests against a 0.5s pipeline stub must finish in < 1.5s total."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    test_client, mock_pipe, _ = client
+
+    def slow_handle(req):
+        time.sleep(0.5)
+        return QueryResponse(
+            session_id=req.session_id,
+            response="Slow response",
+            query_type=QueryType.SIMPLE,
+            from_cache=False,
+            sources=[],
+            latency_ms=500.0,
+        )
+
+    mock_pipe.handle_query.side_effect = slow_handle
+
+    start_time = time.time()
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [
+            executor.submit(
+                test_client.post,
+                "/query",
+                json={"query": f"Query {i}", "session_id": str(uuid4())},
+            )
+            for i in range(5)
+        ]
+        results = [f.result() for f in futures]
+
+    total_time = time.time() - start_time
+    for r in results:
+        assert r.status_code == 200
+    assert total_time < 1.5
+
+
+def test_health_check_responds_promptly_during_slow_query(client):
+    """I-14: /health answers in < 100ms while a slow query is in flight."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    test_client, mock_pipe, _ = client
+
+    def slow_handle(req):
+        time.sleep(0.5)
+        return QueryResponse(
+            session_id=req.session_id,
+            response="Slow response",
+            query_type=QueryType.SIMPLE,
+            from_cache=False,
+            sources=[],
+            latency_ms=500.0,
+        )
+
+    mock_pipe.handle_query.side_effect = slow_handle
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        query_future = executor.submit(
+            test_client.post,
+            "/query",
+            json={"query": "slow", "session_id": str(uuid4())},
+        )
+        time.sleep(0.05)
+
+        t_health_start = time.time()
+        health_resp = test_client.get("/health")
+        t_health = time.time() - t_health_start
+
+        query_resp = query_future.result()
+
+    assert query_resp.status_code == 200
+    assert health_resp.status_code == 200
+    assert t_health < 0.10
+
 

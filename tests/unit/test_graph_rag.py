@@ -207,3 +207,21 @@ class TestCodeReingestion:
         summary2 = ingest_codebase(str(tmp_path), mock_driver)
         assert summary2 == summary1
 
+    def test_ingest_codebase_skips_non_python_files_and_reports_count(self, tmp_path):
+        # Create 1 python file and multiple non-python files
+        (tmp_path / "app.py").write_text("def run():\n    pass\n", encoding="utf-8")
+        (tmp_path / "notes.txt").write_text("Some text notes", encoding="utf-8")
+        (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "style.css").write_text("body { color: red; }", encoding="utf-8")
+
+        mock_driver = MagicMock()
+        mock_session = MagicMock()
+        mock_driver.session.return_value.__enter__.return_value = mock_session
+
+        summary = ingest_codebase(str(tmp_path), mock_driver)
+        assert summary["files"] == 1
+        assert summary["skipped_non_python"] == 3
+        assert ".txt" in summary["skipped_extensions"]
+        assert ".json" in summary["skipped_extensions"]
+        assert ".css" in summary["skipped_extensions"]
+

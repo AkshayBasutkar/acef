@@ -126,17 +126,57 @@ def ingest_codebase(root_path: str, neo4j_driver) -> dict:
         Summary: {"files": N, "symbols": N, "calls": N, "imports": N}
     """
     root = Path(root_path).resolve()
+    root_str = str(root)
     if not root.is_dir():
         raise FileNotFoundError(f"Codebase path not found: {root}")
 
     # Ensure indexes exist before ingesting
     init_neo4j(neo4j_driver)
 
-    # ── Phase 1: Discover and parse all .py files ────────────────────────
-    py_files = sorted(root.rglob("*.py"))
+    # ── Phase 1: Discover all files and filter Python vs non-Python ──────
+    ignore_dirs = {
+        ".git", ".venv", "venv", "env", "node_modules",
+        "__pycache__", ".pytest_cache", ".idea", ".vscode"
+    }
+    all_files = [
+        f for f in sorted(root.rglob("*"))
+        if f.is_file() and not any(part in ignore_dirs for part in f.parts)
+    ]
+    py_files = [
+        f for f in all_files
+        if f.suffix == ".py" and f.stat().st_size <= 1_048_576
+    ]
+    non_py_files = [f for f in all_files if f.suffix != ".py"]
+
+    skipped_extensions = {f.suffix.lower() for f in non_py_files if f.suffix}
+    if any(not f.suffix for f in non_py_files):
+        skipped_extensions.add("(no extension)")
+
+    if non_py_files:
+        logger.info(
+            "Found %d non-Python files in %s; skipping them. Extensions: %s",
+            len(non_py_files),
+            root_str,
+            ", ".join(sorted(skipped_extensions)),
+        )
+
     if not py_files:
-        logger.warning("No .py files found in %s", root)
-        return {"files": 0, "symbols": 0, "calls": 0, "imports": 0}
+        logger.warning(
+            "No .py files found in %s (%d non-Python files skipped)",
+            root, len(non_py_files)
+        )
+        return {
+            "files": 0,
+            "files_scanned": 0,
+            "symbols": 0,
+            "symbols_created": 0,
+            "calls": 0,
+            "call_relationships": 0,
+            "imports": 0,
+            "import_relationships": 0,
+            "skipped_non_python": len(non_py_files),
+            "skipped_extensions": sorted(list(skipped_extensions)),
+        }
 
     # Map file stems to file paths (for resolving intra-project imports)
     stem_to_path: dict[str, str] = {}
@@ -286,13 +326,19 @@ def ingest_codebase(root_path: str, neo4j_driver) -> dict:
 
         counters = {
             "files": len(file_payload),
+            "files_scanned": len(file_payload),
             "symbols": len(symbol_payload),
+            "symbols_created": len(symbol_payload),
             "calls": len(call_payload),
+            "call_relationships": len(call_payload),
             "imports": len(import_payload),
+            "import_relationships": len(import_payload),
+            "skipped_non_python": len(non_py_files),
+            "skipped_extensions": sorted(list(skipped_extensions)),
         }
 
     logger.info(
-        "Ingestion complete — files=%d, symbols=%d, calls=%d, imports=%d",
-        counters["files"], counters["symbols"], counters["calls"], counters["imports"],
+        "Ingestion complete — files=%d, symbols=%d, calls=%d, imports=%d, skipped_non_python=%d",
+        counters["files"], counters["symbols"], counters["calls"], counters["imports"], counters["skipped_non_python"],
     )
     return counters
