@@ -5,6 +5,7 @@ Endpoints:
   - POST /query: Process query through the 5-step Pipeline
   - POST /ingest/code: Ingest Python codebase into Neo4j
   - POST /ingest/document: Upload and ingest .txt/.md/.pdf into Chroma
+  - POST /ingest/documents: Batch upload and ingest multiple .txt/.md/.pdf documents into Chroma
   - GET /health: Status check for Neo4j and ChromaDB
 """
 
@@ -88,7 +89,12 @@ def init_services():
     # 4. Modules
     cache = RAGCacheLite(_services["chroma_client"], embed_model)
     mem_rag = MemRAG(_services["chroma_client"], embed_model)
-    graph_rag = GraphRAG(_services["neo4j_driver"])
+    graph_rag = GraphRAG(
+        _services["neo4j_driver"],
+        max_hops=settings.graph_retrieval_max_hops,
+        min_score=settings.graph_retrieval_min_score,
+        root=str(Path(settings.demo_codebase_path).resolve()),
+    )
     llm_client = LLMClient(settings)
 
     # 5. Corpus Index
@@ -188,9 +194,12 @@ async def get_graph_data():
                         "name": str(name),
                         "type": node_type,
                         "kind": props.get("kind", node_type.lower()),
+                        "qualname": props.get("qualname", str(name)),
+                        "parent_class": props.get("parent_class", ""),
                         "docstring": props.get("docstring", ""),
                         "file_path": props.get("file_path", props.get("path", "")),
                         "lineno": props.get("lineno", 0),
+                        "end_lineno": props.get("end_lineno", props.get("lineno", 0)),
                         "source": props.get("source", ""),
                     }
 
@@ -214,6 +223,86 @@ async def get_graph_data():
             return {"nodes": [], "links": [], "error": str(e)}
 
     return await run_in_threadpool(_fetch)
+
+
+@app.post("/graph/clear", summary="Clear Neo4j Knowledge Graph")
+@app.delete("/graph/clear", summary="Clear Neo4j Knowledge Graph")
+async def clear_graph():
+    """
+    Delete all nodes and relationships from the Neo4j knowledge graph.
+    Refreshes the CorpusIndex and clears semantic cache.
+    """
+    if _services.get("neo4j_driver") is None:
+        init_services()
+    driver = _services.get("neo4j_driver")
+    if not driver:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Neo4j driver not connected")
+
+    def _execute_clear():
+        try:
+            with driver.session() as session:
+                # Count nodes before deletion for response summary
+                count_res = session.run("MATCH (n) RETURN count(n) AS cnt").single()
+                nodes_count = count_res["cnt"] if count_res else 0
+
+                # Purge all nodes and relationships
+                session.run("MATCH (n) DETACH DELETE n")
+
+            # Refresh corpus index if available
+            if _services.get("corpus_index") is not None:
+                _services["corpus_index"].refresh_from_neo4j(driver)
+            if _services.get("pipeline"):
+                if hasattr(_services["pipeline"], "corpus_index"):
+                    _services["pipeline"].corpus_index.refresh_from_neo4j(driver)
+                if hasattr(_services["pipeline"], "graph_rag"):
+                    _services["pipeline"].graph_rag._root = None
+                if hasattr(_services["pipeline"], "cache"):
+                    _services["pipeline"].cache.clear()
+
+            logger.info("Cleared entire Neo4j graph (%d nodes deleted).", nodes_count)
+            return {
+                "status": "success",
+                "message": f"Successfully cleared graph ({nodes_count} nodes deleted)",
+                "nodes_deleted": nodes_count,
+            }
+        except Exception as e:
+            logger.error("Failed to clear Neo4j graph: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to clear graph: {str(e)}",
+            )
+
+    return await run_in_threadpool(_execute_clear)
+
+
+@app.post("/cache/clear", summary="Clear Semantic Cache")
+@app.delete("/cache/clear", summary="Clear Semantic Cache")
+async def clear_cache_endpoint():
+    """
+    Clear all cached query-response pairs from RAGCacheLite.
+    Returns confirmation of purged cache entries.
+    """
+    def _execute_cache_clear():
+        cleared = False
+        pipeline = _services.get("pipeline")
+        if pipeline and hasattr(pipeline, "cache") and pipeline.cache is not None:
+            pipeline.cache.clear()
+            cleared = True
+        elif _services.get("chroma_client") and _services.get("embedding_model"):
+            cache = RAGCacheLite(_services["chroma_client"], _services["embedding_model"])
+            cache.clear()
+            cleared = True
+
+        if cleared:
+            logger.info("Cleared semantic cache.")
+            return {"status": "success", "message": "Semantic cache cleared successfully"}
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clear semantic cache: cache service not initialized",
+        )
+
+    return await run_in_threadpool(_execute_cache_clear)
 
 
 def get_pipeline() -> Pipeline:
@@ -291,6 +380,8 @@ async def ingest_code(payload: Optional[IngestCodeRequest] = None, root_path: Op
                     _services["pipeline"].cache.clear()
                 if hasattr(_services["pipeline"], "corpus_index"):
                     _services["pipeline"].corpus_index.refresh_from_neo4j(driver)
+                if hasattr(_services["pipeline"], "graph_rag"):
+                    _services["pipeline"].graph_rag._root = resolved_path.resolve().as_posix()
             return summary
 
         summary = await run_in_threadpool(_execute_code_ingest)
@@ -310,68 +401,190 @@ async def ingest_code(payload: Optional[IngestCodeRequest] = None, root_path: Op
         )
 
 
-@app.post("/ingest/document", summary="Ingest Document File")
-async def ingest_doc(file: UploadFile = File(...)) -> dict:
+async def _process_single_document_file(
+    upload_file: UploadFile,
+    max_bytes: int,
+    mem_rag,
+    embed_model,
+) -> tuple[Optional[int], Optional[str], int]:
     """
-    Upload and ingest a .txt, .md, or .pdf document into Chroma's memory collection.
-    """
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="Missing file name")
+    Stream, validate, and ingest a single document file into ChromaDB.
 
-    suffix = Path(file.filename).suffix.lower()
+    Returns
+    -------
+    tuple[Optional[int], Optional[str], int]
+        (chunk_count, error_message, http_status_code)
+    """
+    filename = upload_file.filename or ""
+    if not filename:
+        return None, "Missing file name", status.HTTP_400_BAD_REQUEST
+
+    suffix = Path(filename).suffix.lower()
     if suffix not in {".txt", ".md", ".pdf"}:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type '{suffix}'. Allowed: .txt, .md, .pdf",
+        return (
+            None,
+            f"Unsupported file type '{suffix}'. Allowed: .txt, .md, .pdf",
+            status.HTTP_400_BAD_REQUEST,
         )
 
-    settings = get_settings()
-    max_bytes = settings.max_upload_bytes
     total_bytes = 0
-
-    # I-10: Stream and validate maximum upload size
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        while chunk := await file.read(65536):
-            total_bytes += len(chunk)
-            if total_bytes > max_bytes:
-                tmp.close()
-                Path(tmp.name).unlink(missing_ok=True)
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"File exceeds maximum allowed upload size of {max_bytes} bytes",
-                )
-            tmp.write(chunk)
-        tmp_path = Path(tmp.name)
-
+    tmp_path = None
     try:
-        if _services["mem_rag"] is None:
-            init_services()
-
-        mem_rag = _services["mem_rag"]
-        embed_model = _get_embedding_model()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            while chunk := await upload_file.read(65536):
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    tmp.close()
+                    Path(tmp.name).unlink(missing_ok=True)
+                    return (
+                        None,
+                        f"File exceeds maximum allowed upload size of {max_bytes} bytes",
+                        status.HTTP_413_CONTENT_TOO_LARGE,
+                    )
+                tmp.write(chunk)
+            tmp_path = Path(tmp.name)
 
         def _execute_doc_ingest():
-            chunk_count = ingest_document(
+            return ingest_document(
                 file_path=str(tmp_path),
                 chroma_collection=mem_rag.collection,
                 embedding_model=embed_model,
+                source_name=filename,
             )
-            if _services.get("pipeline") and hasattr(_services["pipeline"], "cache"):
-                _services["pipeline"].cache.clear()
-            return chunk_count
 
         chunk_count = await run_in_threadpool(_execute_doc_ingest)
+        if chunk_count == 0:
+            return (
+                None,
+                "No extractable text was found in this file. Image-only PDFs are not supported.",
+                status.HTTP_400_BAD_REQUEST,
+            )
+        return chunk_count, None, status.HTTP_200_OK
+
+    except ValueError as e:
+        logger.warning("Document ingestion rejected for %s: %s", filename, e)
+        return None, str(e), status.HTTP_400_BAD_REQUEST
+    except Exception as e:
+        logger.error("Document ingestion failed for %s: %s", filename, e, exc_info=True)
+        return None, f"Document ingestion failed: {str(e)}", status.HTTP_500_INTERNAL_SERVER_ERROR
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink()
+
+
+async def _handle_documents_ingest(
+    file_list: list[UploadFile],
+    is_batch_endpoint: bool = False,
+) -> dict:
+    valid_files = [f for f in file_list if f is not None and f.filename]
+    if not valid_files:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing file name")
+
+    if _services["mem_rag"] is None:
+        init_services()
+
+    mem_rag = _services["mem_rag"]
+    embed_model = _get_embedding_model()
+    settings = get_settings()
+
+    # Single-file mode: if called from /ingest/document with exactly 1 file,
+    # preserve the exact response schema and direct HTTP exception semantics.
+    if len(valid_files) == 1 and not is_batch_endpoint:
+        f = valid_files[0]
+        chunk_count, err_msg, err_code = await _process_single_document_file(
+            f, settings.max_upload_bytes, mem_rag, embed_model
+        )
+        if err_msg is not None:
+            raise HTTPException(status_code=err_code, detail=err_msg)
+
+        if _services.get("pipeline") and hasattr(_services["pipeline"], "cache"):
+            _services["pipeline"].cache.clear()
+
         return {
             "status": "success",
-            "filename": file.filename,
+            "filename": f.filename,
             "chunks_stored": chunk_count,
+            "chunks_created": chunk_count,
         }
-    except Exception as e:
-        logger.error("Document ingestion failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Document ingestion failed: {str(e)}")
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
+
+    # Multi-file or batch mode
+    results = []
+    successful = 0
+    total_chunks = 0
+
+    for f in valid_files:
+        chunk_count, err_msg, err_code = await _process_single_document_file(
+            f, settings.max_upload_bytes, mem_rag, embed_model
+        )
+        if err_msg is not None:
+            results.append({
+                "filename": f.filename,
+                "status": "error",
+                "error": err_msg,
+                "status_code": err_code,
+            })
+        else:
+            successful += 1
+            total_chunks += chunk_count
+            results.append({
+                "filename": f.filename,
+                "status": "success",
+                "chunks_stored": chunk_count,
+                "chunks_created": chunk_count,
+            })
+
+    if successful > 0 and _services.get("pipeline") and hasattr(_services["pipeline"], "cache"):
+        _services["pipeline"].cache.clear()
+
+    failed_count = len(valid_files) - successful
+    if successful == len(valid_files):
+        overall_status = "success"
+    elif successful > 0:
+        overall_status = "partial_success"
+    else:
+        overall_status = "error"
+
+    if successful == 0:
+        err_details = "; ".join(f"{r['filename']}: {r.get('error', 'Failed')}" for r in results)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"All {len(valid_files)} file(s) failed ingestion: {err_details}",
+        )
+
+    return {
+        "status": overall_status,
+        "total_files": len(valid_files),
+        "successful": successful,
+        "failed": failed_count,
+        "total_chunks_stored": total_chunks,
+        "results": results,
+    }
+
+
+@app.post("/ingest/document", summary="Ingest Document File(s)")
+async def ingest_doc(
+    file: Optional[list[UploadFile]] = File(None),
+    files: Optional[list[UploadFile]] = File(None),
+) -> dict:
+    """
+    Upload and ingest one or more .txt, .md, or .pdf documents into Chroma's memory collection.
+    Accepts single or multiple files under 'file' or 'files'.
+    """
+    file_list = [f for f in ((file or []) + (files or [])) if f is not None]
+    return await _handle_documents_ingest(file_list, is_batch_endpoint=False)
+
+
+@app.post("/ingest/documents", summary="Batch Ingest Multiple Documents")
+async def ingest_docs(
+    files: Optional[list[UploadFile]] = File(None),
+    file: Optional[list[UploadFile]] = File(None),
+) -> dict:
+    """
+    Upload and batch ingest multiple .txt, .md, or .pdf documents into Chroma's memory collection.
+    Returns structured results for each file.
+    """
+    file_list = [f for f in ((files or []) + (file or [])) if f is not None]
+    return await _handle_documents_ingest(file_list, is_batch_endpoint=True)
 
 
 @app.get("/health", response_model=HealthResponse, summary="System Health Check")
@@ -410,11 +623,17 @@ async def health_check() -> HealthResponse:
         elif _services.get("pipeline") and hasattr(_services["pipeline"], "llm"):
             llm_ok = _services["pipeline"].llm.is_configured()
 
+        settings = get_settings()
+        active_model = settings.gemini_model if settings.llm_provider == "gemini" else settings.groq_model
+
         return HealthResponse(
             status=overall_status,
             neo4j_connected=neo4j_ok,
             chroma_ready=chroma_ok,
             llm_configured=llm_ok,
+            provider=settings.llm_provider,
+            model=active_model,
+            classifier_mode=settings.classifier_mode,
         )
 
     return await run_in_threadpool(_execute_health)

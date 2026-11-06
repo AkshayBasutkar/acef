@@ -48,4 +48,7 @@ class HealthResponse(BaseModel):
     neo4j_connected: bool
     chroma_ready: bool
     llm_configured: bool = Field(default=False)
+    provider: str | None = None
+    model: str | None = None
+    classifier_mode: str | None = None
 

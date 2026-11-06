@@ -7,6 +7,7 @@ or environment variables directly.
 """
 
 from functools import lru_cache
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,12 +42,30 @@ class Settings(BaseSettings):
     # ── Memory retrieval ─────────────────────────────────────────────────────
     memory_top_k: int = 5
     memory_long_conversation_turns: int = 3     # session turn count that counts as "long"
-    doc_route_threshold: float = 0.45           # document probe similarity threshold for MEMORY routing
+    doc_route_threshold: float = 0.33           # document probe similarity threshold for MEMORY routing (calibrated on eval set)
     memory_relevance_floor: float = 0.30        # minimum similarity floor below which chunks are dropped
 
     # ── Context budget ───────────────────────────────────────────────────────
     max_context_chars: int = 6000               # simple character-based truncation
     graph_source_max_chars: int = 1200          # per-symbol code body truncation for GraphRAG
+
+    # ── GraphRAG retrieval tuning ────────────────────────────────────────────
+    graph_retrieval_max_hops: int = 2           # max traversal depth for call chains (1 = direct only)
+    graph_retrieval_min_score: float = 0.0      # minimum full-text search score to keep a symbol match (Lucene BM25)
+
+    @field_validator("graph_retrieval_max_hops")
+    @classmethod
+    def validate_max_hops(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"graph_retrieval_max_hops must be >= 1, got {v}")
+        return v
+
+    @field_validator("graph_retrieval_min_score")
+    @classmethod
+    def validate_min_score(cls, v: float) -> float:
+        if v < 0.0:
+            raise ValueError(f"graph_retrieval_min_score must be >= 0.0, got {v}")
+        return v
 
     # ── Demo ─────────────────────────────────────────────────────────────────
     demo_codebase_path: str = "./data/demo_codebase"

@@ -1,0 +1,21 @@
+{"id": "mem_01", "query": "What are the pricing tiers for CloudScale AI?", "category": "factual_doc", "expected_route": "memory", "expected_source": "pricing.md", "min_expected_sim": 0.33}
+{"id": "mem_02", "query": "How much does the Developer tier cost?", "category": "factual_doc", "expected_route": "memory", "expected_source": "pricing.md", "min_expected_sim": 0.33}
+{"id": "mem_03", "query": "What are the token limits on the Professional plan?", "category": "factual_doc", "expected_route": "memory", "expected_source": "pricing.md", "min_expected_sim": 0.33}
+{"id": "mem_04", "query": "What features are included in Enterprise tier?", "category": "factual_doc", "expected_route": "memory", "expected_source": "pricing.md", "min_expected_sim": 0.33}
+{"id": "mem_05", "query": "How much is additional vector storage?", "category": "factual_doc", "expected_route": "memory", "expected_source": "pricing.md", "min_expected_sim": 0.33}
+{"id": "mem_06", "query": "What is the rate limit for Developer tier?", "category": "factual_doc", "expected_route": "memory", "expected_source": "pricing.md", "min_expected_sim": 0.33}
+{"id": "mem_07", "query": "How much do I pay for the middle tier?", "category": "paraphrase_doc", "expected_route": "memory", "expected_source": "pricing.md", "min_expected_sim": 0.33}
+{"id": "mem_08", "query": "What is the cost per seat for the pro subscription?", "category": "paraphrase_doc", "expected_route": "memory", "expected_source": "pricing.md", "min_expected_sim": 0.33}
+{"id": "mem_09", "query": "Is there a free trial or zero cost tier?", "category": "paraphrase_doc", "expected_route": "memory", "expected_source": "pricing.md", "min_expected_sim": 0.33}
+{"id": "mem_10", "query": "How much do extra tokens cost when exceeding quota?", "category": "paraphrase_doc", "expected_route": "memory", "expected_source": "pricing.md", "min_expected_sim": 0.33}
+{"id": "mem_11", "query": "Can you tell me more about that second plan?", "category": "conv_followup", "expected_route": "memory", "requires_conversation": true}
+{"id": "mem_12", "query": "What was the cost of the first option you mentioned?", "category": "conv_followup", "expected_route": "memory", "requires_conversation": true}
+{"id": "mem_13", "query": "Do you offer a discount for non-profit organizations?", "category": "near_miss", "expected_route": "simple", "expected_source": null}
+{"id": "mem_14", "query": "Is there an academic or student discount available?", "category": "near_miss", "expected_route": "simple", "expected_source": null}
+{"id": "mem_15", "query": "What hardware accelerators besides GPUs do you support?", "category": "near_miss", "expected_route": "simple", "expected_source": null}
+{"id": "mem_16", "query": "What is the refund policy for annual billing?", "category": "near_miss", "expected_route": "simple", "expected_source": null}
+{"id": "mem_17", "query": "What is the capital of France?", "category": "unrelated", "expected_route": "simple", "expected_source": null}
+{"id": "mem_18", "query": "Write a quicksort implementation in Python", "category": "unrelated", "expected_route": "simple", "expected_source": null}
+{"id": "mem_19", "query": "How do I make chocolate chip cookies?", "category": "unrelated", "expected_route": "simple", "expected_source": null}
+{"id": "mem_20", "query": "Hello, how are you today?", "category": "unrelated", "expected_route": "simple", "expected_source": null}
+

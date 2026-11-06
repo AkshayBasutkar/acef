@@ -46,10 +46,11 @@ SYSTEM_PROMPTS: dict[str, str] = {
         "context doesn't fully cover the question, say so explicitly."
     ),
     "memory": (
-        "You are a helpful assistant with access to relevant past "
-        "conversation and document excerpts below. Use them to answer "
-        "accurately, and mention the source document or prior turn when "
-        "relevant. If the context doesn't answer the question, say so."
+        "You are a helpful assistant with access to uploaded document excerpts "
+        "and prior conversation history below. Treat uploaded documents as the primary "
+        "source of truth when document evidence conflicts with prior conversation. "
+        "Use them to answer accurately, and mention the source document or prior turn "
+        "when relevant. If the context doesn't answer the question, say so."
     ),
 }
 

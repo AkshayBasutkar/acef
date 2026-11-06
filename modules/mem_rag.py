@@ -111,14 +111,15 @@ class MemRAG:
         session_id: str,
         top_k: int = 5,
         query_vec: Optional[list[float]] = None,
+        doc_top_k: int = 3,
+        conv_top_k: int = 2,
     ) -> list[RetrievedChunk]:
         """
         Retrieve relevant document excerpts and conversation history for this session.
 
-        Executes two queries to guarantee compatibility across all Chroma versions:
-          1. Documents: where={"type": "document"}
-          2. Conversation: where={"$and": [{"type": "conversation"}, {"session_id": session_id}]}
-        Merges results by cosine distance and returns the overall top_k chunks.
+        Preserves separate quotas for documents (default up to 3) and conversation
+        turns (default up to 2) so prior dialogue never crowds out source document
+        evidence. Each stream enforces the relevance floor and is explicitly labeled.
 
         Parameters
         ----------
@@ -127,14 +128,18 @@ class MemRAG:
         session_id : str
             Session identifier for isolating conversation memory.
         top_k : int
-            Maximum number of combined chunks to return (default 5).
+            Legacy parameter for total combined chunks (default 5).
         query_vec : list[float], optional
             Precomputed query embedding vector to avoid redundant model encoding.
+        doc_top_k : int
+            Maximum number of document chunks to retrieve (default 3).
+        conv_top_k : int
+            Maximum number of conversation turns to retrieve (default 2).
 
         Returns
         -------
         list[RetrievedChunk]
-            Matched chunks with text and source annotations.
+            Matched chunks with text labeled by evidence type and source annotations.
         """
         if self._collection.count() == 0:
             return []
@@ -144,13 +149,13 @@ class MemRAG:
         else:
             emb_list = self.embed_query(query)
 
-        candidates = []
-
-        # 1. Query document chunks
+        # 1. Query document chunks (quota: up to doc_top_k)
+        doc_chunks: list[RetrievedChunk] = []
+        doc_candidates = []
         try:
             doc_res = self._collection.query(
                 query_embeddings=[emb_list],
-                n_results=top_k,
+                n_results=doc_top_k,
                 where={"type": "document"},
                 include=["documents", "metadatas", "distances"],
             )
@@ -161,22 +166,28 @@ class MemRAG:
                     doc_res["distances"][0],
                 ):
                     sim = max(0.0, 1.0 - dist)
-                    # I-11: Drop chunks below relevance floor
                     if sim >= self._relevance_floor:
-                        candidates.append({
-                            "text": doc,
-                            "source": meta.get("source", "document") if isinstance(meta, dict) else "document",
+                        source = meta.get("source", "document") if isinstance(meta, dict) else "document"
+                        doc_candidates.append({
+                            "text": f"Document evidence — {source}:\n{doc}",
+                            "source": source,
                             "distance": dist,
                             "similarity": sim,
                         })
         except Exception as e:
             logger.warning("Error querying document chunks: %s", e)
 
-        # 2. Query conversation turns for this session
+        doc_candidates.sort(key=lambda x: x["distance"])
+        for c in doc_candidates[:doc_top_k]:
+            doc_chunks.append(RetrievedChunk(text=c["text"], source=c["source"]))
+
+        # 2. Query conversation turns for this session (quota: up to conv_top_k)
+        conv_chunks: list[RetrievedChunk] = []
+        conv_candidates = []
         try:
             conv_res = self._collection.query(
                 query_embeddings=[emb_list],
-                n_results=top_k,
+                n_results=conv_top_k,
                 where={
                     "$and": [
                         {"type": "conversation"},
@@ -192,10 +203,9 @@ class MemRAG:
                     conv_res["distances"][0],
                 ):
                     sim = max(0.0, 1.0 - dist)
-                    # I-11: Drop conversation turns below relevance floor
                     if sim >= self._relevance_floor:
-                        candidates.append({
-                            "text": doc,
+                        conv_candidates.append({
+                            "text": f"Prior conversation — may be incomplete:\n{doc}",
                             "source": f"conversation turn ({session_id})",
                             "distance": dist,
                             "similarity": sim,
@@ -203,17 +213,12 @@ class MemRAG:
         except Exception as e:
             logger.warning("Error querying conversation turns: %s", e)
 
-        if not candidates:
-            return []
+        conv_candidates.sort(key=lambda x: x["distance"])
+        for c in conv_candidates[:conv_top_k]:
+            conv_chunks.append(RetrievedChunk(text=c["text"], source=c["source"]))
 
-        # Sort candidates ascending by distance (lower distance = closer match)
-        candidates.sort(key=lambda x: x["distance"])
-        top_candidates = candidates[:top_k]
-
-        return [
-            RetrievedChunk(text=c["text"], source=c["source"])
-            for c in top_candidates
-        ]
+        # Return document evidence first, followed by conversation turns
+        return doc_chunks + conv_chunks
 
     # ─────────────────────────────────────────────────────────────────────────
     def append_turn(

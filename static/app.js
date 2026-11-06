@@ -1,12 +1,16 @@
 /**
- * ACEF Web Application Controller
- * Handles interactive chat, ingestion studio, health telemetry, and live architecture visualization.
+ * ACEF Web Application Controller (v2.0)
+ * Modernized interactive interface for the Adaptive Context Engineering Framework.
+ * Integrates Chat Studio, Telemetry, Dual-Guard Semantic Caching, and Force-Directed Graph Visualizer.
  */
 
 // ── State ────────────────────────────────────────────────────────────────────
 const state = {
   sessionId: generateUUID(),
   isQuerying: false,
+  provider: 'gemini',
+  model: '',
+  classifierMode: 'heuristic',
 };
 
 function generateUUID() {
@@ -25,6 +29,7 @@ const elements = {
   pillNeo4j: document.getElementById('pill-neo4j'),
   pillChroma: document.getElementById('pill-chroma'),
   pillLlm: document.getElementById('pill-llm'),
+  pillClassifier: document.getElementById('pill-classifier'),
   btnRefreshHealth: document.getElementById('btn-refresh-health'),
 
   // Tabs
@@ -66,6 +71,8 @@ const elements = {
   btnModeChat: document.getElementById('btn-mode-chat'),
   btnModeGraph: document.getElementById('btn-mode-graph'),
   btnQuickViewGraph: document.getElementById('btn-quick-view-graph'),
+  btnGraphClear: document.getElementById('btn-graph-clear'),
+  btnClearGraphSidebar: document.getElementById('btn-clear-graph-sidebar'),
   panelChat: document.getElementById('panel-chat'),
   panelGraph: document.getElementById('panel-graph'),
 };
@@ -78,76 +85,117 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function updateSessionDisplay() {
-  elements.displaySessionId.textContent = state.sessionId.substring(0, 13) + '...';
-  elements.displaySessionId.title = `Full Session ID: ${state.sessionId}`;
+  if (elements.displaySessionId) {
+    elements.displaySessionId.textContent = state.sessionId.substring(0, 13) + '...';
+    elements.displaySessionId.title = `Full Session ID: ${state.sessionId}`;
+  }
 }
 
-// ── Health Check ─────────────────────────────────────────────────────────────
+// ── Health & Telemetry Check ─────────────────────────────────────────────────
 async function checkHealth() {
   try {
     const res = await fetch('/health');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
-    // Neo4j
+    // Neo4j Status
     updatePill(elements.pillNeo4j, data.neo4j_connected, 'Connected', 'Offline');
-    // Chroma
-    updatePill(elements.pillChroma, data.chroma_ready, 'Ready', 'Unavailable');
-    // LLM
-    updatePill(elements.pillLlm, data.llm_configured, 'Active', 'Unconfigured');
+
+    // ChromaDB Status
+    updatePill(elements.pillChroma, data.chroma_ready, 'Ready', 'Offline');
+
+    // LLM Generator Engine
+    const llmOk = data.llm_configured === true;
+    let llmLabel = 'Active';
+    if (data.provider) {
+      state.provider = data.provider;
+      const provName = data.provider.charAt(0).toUpperCase() + data.provider.slice(1);
+      const modName = data.model ? ` (${data.model.replace('gemini-', '').replace('-versatile', '')})` : '';
+      llmLabel = llmOk ? `${provName}${modName}` : 'Unconfigured';
+    }
+    updatePill(elements.pillLlm, llmOk, llmLabel, 'Unconfigured');
+
+    // Classifier Mode
+    if (elements.pillClassifier) {
+      const mode = data.classifier_mode || 'heuristic';
+      state.classifierMode = mode;
+      const capMode = mode.charAt(0).toUpperCase() + mode.slice(1);
+      elements.pillClassifier.querySelector('.val').textContent = capMode;
+      elements.pillClassifier.classList.remove('status-err');
+      elements.pillClassifier.classList.add('status-ok');
+    }
   } catch (err) {
     console.error('Health check failed:', err);
     updatePill(elements.pillNeo4j, false, 'Connected', 'Offline');
     updatePill(elements.pillChroma, false, 'Ready', 'Offline');
     updatePill(elements.pillLlm, false, 'Active', 'Offline');
+    if (elements.pillClassifier) {
+      updatePill(elements.pillClassifier, false, 'Router', 'Offline');
+    }
   }
 }
 
 function updatePill(pill, isOk, okText, errText) {
+  if (!pill) return;
   pill.classList.remove('status-ok', 'status-err');
   pill.classList.add(isOk ? 'status-ok' : 'status-err');
-  pill.querySelector('.val').textContent = isOk ? okText : errText;
+  const valEl = pill.querySelector('.val');
+  if (valEl) valEl.textContent = isOk ? okText : errText;
 }
 
 // ── Event Listeners ──────────────────────────────────────────────────────────
 function setupEventListeners() {
   // Refresh Health
-  elements.btnRefreshHealth.addEventListener('click', () => {
-    checkHealth();
-  });
-
-  // New Session
-  elements.btnNewSession.addEventListener('click', () => {
-    state.sessionId = generateUUID();
-    updateSessionDisplay();
-    // Clear chat messages except welcome card
-    elements.messagesContainer.innerHTML = '';
-    elements.messagesContainer.appendChild(elements.welcomeBanner);
-    elements.welcomeBanner.style.display = 'block';
-    resetVisualizer();
-    setDockStatus('New session started');
-  });
-
-  // View Mode Switching (Chat Studio vs Knowledge Graph)
-  function switchView(mode) {
-    if (mode === 'chat') {
-      if (elements.btnModeChat) elements.btnModeChat.classList.add('active');
-      if (elements.btnModeGraph) elements.btnModeGraph.classList.remove('active');
-      if (elements.panelChat) elements.panelChat.style.display = 'flex';
-      if (elements.panelGraph) elements.panelGraph.style.display = 'none';
-    } else if (mode === 'graph') {
-      if (elements.btnModeGraph) elements.btnModeGraph.classList.add('active');
-      if (elements.btnModeChat) elements.btnModeChat.classList.remove('active');
-      if (elements.panelChat) elements.panelChat.style.display = 'none';
-      if (elements.panelGraph) elements.panelGraph.style.display = 'flex';
-      graphVisualizer.init();
-    }
+  if (elements.btnRefreshHealth) {
+    elements.btnRefreshHealth.addEventListener('click', () => {
+      checkHealth();
+      setDockStatus('Refreshing system health...');
+    });
   }
 
-  if (elements.btnModeChat) elements.btnModeChat.addEventListener('click', () => switchView('chat'));
-  if (elements.btnModeGraph) elements.btnModeGraph.addEventListener('click', () => switchView('graph'));
+  // New Session
+  if (elements.btnNewSession) {
+    elements.btnNewSession.addEventListener('click', () => {
+      state.sessionId = generateUUID();
+      updateSessionDisplay();
+      elements.messagesContainer.innerHTML = '';
+      if (elements.welcomeBanner) {
+        elements.messagesContainer.appendChild(elements.welcomeBanner);
+        elements.welcomeBanner.style.display = 'block';
+      }
+      resetVisualizer();
+      setDockStatus('New session started: ' + state.sessionId.substring(0, 8));
+    });
+  }
+
+  // View Mode Switching (Chat Studio vs Knowledge Graph)
+  window.switchView = function (mode) {
+    const btnModeChat = elements.btnModeChat || document.getElementById('btn-mode-chat');
+    const btnModeGraph = elements.btnModeGraph || document.getElementById('btn-mode-graph');
+    const panelChat = elements.panelChat || document.getElementById('panel-chat');
+    const panelGraph = elements.panelGraph || document.getElementById('panel-graph');
+
+    if (mode === 'chat') {
+      if (btnModeChat) btnModeChat.classList.add('active');
+      if (btnModeGraph) btnModeGraph.classList.remove('active');
+      if (panelChat) panelChat.style.display = 'flex';
+      if (panelGraph) panelGraph.style.display = 'none';
+    } else if (mode === 'graph') {
+      if (btnModeGraph) btnModeGraph.classList.add('active');
+      if (btnModeChat) btnModeChat.classList.remove('active');
+      if (panelChat) panelChat.style.display = 'none';
+      if (panelGraph) panelGraph.style.display = 'flex';
+      graphVisualizer.init();
+    }
+  };
+
+  if (elements.btnModeChat) elements.btnModeChat.addEventListener('click', () => window.switchView('chat'));
+  if (elements.btnModeGraph) elements.btnModeGraph.addEventListener('click', () => window.switchView('graph'));
   if (elements.btnQuickViewGraph) {
-    elements.btnQuickViewGraph.addEventListener('click', () => switchView('graph'));
+    elements.btnQuickViewGraph.addEventListener('click', () => window.switchView('graph'));
+  }
+  if (elements.btnClearGraphSidebar) {
+    elements.btnClearGraphSidebar.addEventListener('click', () => graphVisualizer.clearGraph());
   }
 
   // Tab Switching
@@ -163,85 +211,96 @@ function setupEventListeners() {
   });
 
   // Auto-resize Query Input
-  elements.queryInput.addEventListener('input', () => {
-    elements.queryInput.style.height = 'auto';
-    elements.queryInput.style.height = Math.min(elements.queryInput.scrollHeight, 140) + 'px';
-  });
+  if (elements.queryInput) {
+    elements.queryInput.addEventListener('input', () => {
+      elements.queryInput.style.height = 'auto';
+      elements.queryInput.style.height = Math.min(elements.queryInput.scrollHeight, 140) + 'px';
+    });
 
-  // Enter to send (Shift+Enter for newline)
-  elements.queryInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      elements.queryForm.dispatchEvent(new Event('submit'));
-    }
-  });
+    elements.queryInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        elements.queryForm.dispatchEvent(new Event('submit'));
+      }
+    });
+  }
 
   // Form Submit
-  elements.queryForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const query = elements.queryInput.value.trim();
-    if (!query || state.isQuerying) return;
-    submitQuery(query);
-  });
+  if (elements.queryForm) {
+    elements.queryForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const query = elements.queryInput.value.trim();
+      if (!query || state.isQuerying) return;
+      submitQuery(query);
+    });
+  }
 
   // Quick Prompts
   document.querySelectorAll('.prompt-card').forEach((card) => {
     card.addEventListener('click', () => {
       const q = card.dataset.query;
-      elements.queryInput.value = q;
-      elements.queryForm.dispatchEvent(new Event('submit'));
+      if (q && elements.queryInput && elements.queryForm) {
+        elements.queryInput.value = q;
+        elements.queryForm.dispatchEvent(new Event('submit'));
+      }
     });
   });
 
   // Ingest Code
-  elements.btnIngestCode.addEventListener('click', handleCodeIngest);
+  if (elements.btnIngestCode) elements.btnIngestCode.addEventListener('click', handleCodeIngest);
 
   // Ingest Document Drop Zone
-  elements.dropZone.addEventListener('click', () => elements.fileInput.click());
-  elements.fileInput.addEventListener('change', (e) => {
-    if (e.target.files.length > 0) {
-      handleDocUpload(e.target.files[0]);
-    }
-  });
-  elements.dropZone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    elements.dropZone.classList.add('dragover');
-  });
-  elements.dropZone.addEventListener('dragleave', () => {
-    elements.dropZone.classList.remove('dragover');
-  });
-  elements.dropZone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    elements.dropZone.classList.remove('dragover');
-    if (e.dataTransfer.files.length > 0) {
-      handleDocUpload(e.dataTransfer.files[0]);
-    }
-  });
+  if (elements.dropZone && elements.fileInput) {
+    elements.dropZone.addEventListener('click', () => elements.fileInput.click());
+    elements.fileInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        handleDocUpload(Array.from(e.target.files));
+        elements.fileInput.value = '';
+      }
+    });
+    elements.dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      elements.dropZone.classList.add('dragover');
+    });
+    elements.dropZone.addEventListener('dragleave', () => {
+      elements.dropZone.classList.remove('dragover');
+    });
+    elements.dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      elements.dropZone.classList.remove('dragover');
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        handleDocUpload(Array.from(e.dataTransfer.files));
+      }
+    });
+  }
 
   // Ingest Demo Doc preset
-  elements.btnIngestDemoDoc.addEventListener('click', handleDemoDocPreset);
+  if (elements.btnIngestDemoDoc) elements.btnIngestDemoDoc.addEventListener('click', handleDemoDocPreset);
 
-  // Clear Cache
-  elements.btnClearCache.addEventListener('click', async () => {
-    elements.btnClearCache.disabled = true;
-    try {
-      // Re-triggering ingest of 0 files or clear
-      setDockStatus('Clearing semantic cache...');
-      // Re-ingest code clears cache, or we can notify user
-      const res = await fetch('/ingest/code', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ root_path: './data/demo_codebase' }),
-      });
-      if (res.ok) {
-        setDockStatus('Semantic Cache Cleared & Demo Code Synchronized');
+  // Clear Semantic Cache via dedicated endpoint
+  if (elements.btnClearCache) {
+    elements.btnClearCache.addEventListener('click', async () => {
+      elements.btnClearCache.disabled = true;
+      try {
+        setDockStatus('Purging RAGCacheLite semantic cache...');
+        const res = await fetch('/cache/clear', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (res.ok) {
+          setDockStatus('Semantic Cache Cleared Successfully (0 entries)');
+          showStatus(elements.codeIngestStatus, 'Dual-Guard Semantic Cache purged.', 'success');
+        } else {
+          throw new Error(data.detail || 'Failed to clear cache');
+        }
+      } catch (err) {
+        setDockStatus('Cache clear error: ' + err.message);
+      } finally {
+        elements.btnClearCache.disabled = false;
       }
-    } catch (err) {
-      setDockStatus('Cache clear error: ' + err.message);
-    } finally {
-      elements.btnClearCache.disabled = false;
-    }
-  });
+    });
+  }
 }
 
 // ── Ingestion Handlers ────────────────────────────────────────────────────────
@@ -251,7 +310,7 @@ async function handleCodeIngest() {
 
   elements.btnIngestCode.disabled = true;
   elements.btnIngestCode.textContent = 'Ingesting...';
-  showStatus(elements.codeIngestStatus, 'Parsing AST and building Neo4j graph...', 'info');
+  showStatus(elements.codeIngestStatus, 'Parsing AST symbols, qualified names & call graph...', 'info');
 
   try {
     const res = await fetch('/ingest/code', {
@@ -286,42 +345,105 @@ async function handleCodeIngest() {
   }
 }
 
-async function handleDocUpload(file) {
-  showStatus(elements.docIngestStatus, `Uploading & chunking ${file.name}...`, 'info');
+async function handleDocUpload(files) {
+  const fileList = Array.isArray(files)
+    ? files
+    : (files instanceof FileList ? Array.from(files) : (files ? [files] : []));
+
+  if (!fileList || fileList.length === 0) return;
+
+  if (fileList.length === 1) {
+    showStatus(elements.docIngestStatus, `Chunking & embedding ${fileList[0].name}...`, 'info');
+  } else {
+    showStatus(elements.docIngestStatus, `Chunking & embedding ${fileList.length} files...`, 'info');
+  }
+
   const formData = new FormData();
-  formData.append('file', file);
+  for (const file of fileList) {
+    formData.append('files', file);
+  }
 
   try {
-    const res = await fetch('/ingest/document', {
+    const res = await fetch('/ingest/documents', {
       method: 'POST',
       body: formData,
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'Document ingestion failed');
+    if (!res.ok) {
+      throw new Error(data.detail || data.message || 'Document ingestion failed');
+    }
 
-    showStatus(
-      elements.docIngestStatus,
-      `Success: ${file.name} chunked into ${data.chunks_created ?? 0} embeddings.`,
-      'success'
-    );
+    if (fileList.length === 1 && data.filename) {
+      const chunks = data.chunks_stored ?? data.chunks_created ?? 0;
+      showStatus(
+        elements.docIngestStatus,
+        `Success: ${data.filename} indexed into ${chunks} embedding${chunks === 1 ? '' : 's'} (ChromaDB).`,
+        'success'
+      );
+    } else if (fileList.length === 1 && Array.isArray(data.results) && data.results.length === 1) {
+      const r = data.results[0];
+      if (r.status === 'success') {
+        const chunks = r.chunks_stored ?? r.chunks_created ?? 0;
+        showStatus(
+          elements.docIngestStatus,
+          `Success: ${r.filename} indexed into ${chunks} embedding${chunks === 1 ? '' : 's'}.`,
+          'success'
+        );
+      } else {
+        showStatus(elements.docIngestStatus, `Error with ${r.filename}: ${r.error}`, 'error');
+      }
+    } else {
+      const successful = data.successful ?? 0;
+      const failed = data.failed ?? 0;
+      const totalChunks = data.total_chunks_stored ?? 0;
+
+      let msg = `Ingested ${successful}/${data.total_files} file${data.total_files === 1 ? '' : 's'} (${totalChunks} total chunks stored).`;
+      if (failed > 0 && Array.isArray(data.results)) {
+        const errorSummaries = data.results
+          .filter(r => r.status === 'error')
+          .map(r => `${r.filename}: ${r.error}`)
+          .join('\n  • ');
+        msg += `\n⚠️ Failed (${failed}):\n  • ${errorSummaries}`;
+        showStatus(elements.docIngestStatus, msg, 'warning');
+      } else {
+        showStatus(elements.docIngestStatus, msg, 'success');
+      }
+    }
   } catch (err) {
     showStatus(elements.docIngestStatus, err.message, 'error');
   }
 }
 
 async function handleDemoDocPreset() {
-  // Fetch local demo document from server and send as blob
-  showStatus(elements.docIngestStatus, 'Ingesting demo pricing.md...', 'info');
+  // Uses full, genuine CloudScale AI Platform dataset matching data/demo_documents/pricing.md
+  showStatus(elements.docIngestStatus, 'Ingesting CloudScale AI pricing.md into ChromaDB...', 'info');
   try {
-    const demoContent = `# ACEF Cloud Platform Pricing
+    const demoContent = `# CloudScale AI Platform — Pricing & Plans
 
-## Plans
-- Starter Tier: Free tier, 10,000 monthly queries, community support.
-- Pro Tier: $49/mo, 250,000 queries, priority email support.
-- Enterprise Tier: Custom pricing, unlimited queries, 99.9% uptime SLA, dedicated technical account manager.
+CloudScale AI offers flexible pricing tiers designed to scale with your team's computational and intelligence needs. All plans include 99.9% uptime SLA, SSL encryption, and community forum access.
 
-## Refund Policy
-Subscriptions may be cancelled within 14 days for a full refund.`;
+## Pricing Tiers
+
+### 1. Developer Tier (Free)
+- **Cost**: $0 / month
+- **API Credits**: 100,000 free tokens per month
+- **Rate Limit**: 15 requests per minute (RPM)
+- **Features**: Single-project workspace, standard community support, access to open-weight standard models (up to 8B parameters), and 50MB vector storage. Ideal for prototyping, hobbyists, and evaluating APIs.
+
+### 2. Professional Tier ($49 / month)
+- **Cost**: $49 / month per seat
+- **API Credits**: 10,000,000 tokens included monthly (additional tokens billed at $0.002 per 1K tokens)
+- **Rate Limit**: 120 requests per minute (RPM)
+- **Features**: Multi-project workspaces, priority email support with 12-hour turnaround, access to frontier LLMs (up to 70B parameters), GraphRAG indexing for codebases up to 50,000 lines, and 5GB vector storage. Built for professional developers and fast-moving startups.
+
+### 3. Enterprise Tier (Custom Pricing)
+- **Cost**: Starting at $499 / month (annual billing available with volume discount)
+- **API Credits**: Dedicated throughput and custom pooled token allocations
+- **Rate Limit**: Custom SLA limits up to 2,000+ RPM
+- **Features**: Custom private VPC deployment, SOC2 Type II and HIPAA compliance, dedicated account manager, 24/7 phone support with 1-hour critical response SLA, unlimited vector and graph storage, and fine-tuning support. Suitable for mid-size to enterprise organizations requiring strict data sovereignty.
+
+## Add-Ons & Overages
+Additional vector storage is priced at $5 per 10GB increment per month. Dedicated compute instances with GPU acceleration start at $1.50 per hour.`;
 
     const blob = new Blob([demoContent], { type: 'text/markdown' });
     const file = new File([blob], 'pricing.md', { type: 'text/markdown' });
@@ -332,6 +454,7 @@ Subscriptions may be cancelled within 14 days for a full refund.`;
 }
 
 function showStatus(elem, msg, type) {
+  if (!elem) return;
   elem.className = `ingest-status show ${type}`;
   elem.textContent = msg;
 }
@@ -340,7 +463,7 @@ function showStatus(elem, msg, type) {
 async function submitQuery(query) {
   state.isQuerying = true;
   elements.btnSend.disabled = true;
-  elements.welcomeBanner.style.display = 'none';
+  if (elements.welcomeBanner) elements.welcomeBanner.style.display = 'none';
 
   // Render User Message
   renderUserMessage(query);
@@ -382,7 +505,8 @@ async function submitQuery(query) {
     // Update Architecture Visualizer
     updateVisualizer(data);
 
-    setDockStatus(`Response completed in ${data.latency_ms ?? clientLatency} ms`);
+    const hitStr = data.from_cache ? ' [Dual-Guard Cache HIT]' : '';
+    setDockStatus(`Response completed in ${Math.round(data.latency_ms ?? clientLatency)} ms${hitStr}`);
   } catch (err) {
     skeletonRow.remove();
     renderErrorMessage(err.message);
@@ -399,45 +523,56 @@ function resetVisualizer() {
   document.querySelectorAll('.flow-step, .branch-card').forEach((el) => {
     el.classList.remove('active-step', 'active-branch');
   });
-  elements.badgeCacheResult.textContent = '—';
-  elements.badgeClassifyResult.textContent = '—';
-  elements.badgeLlmResult.textContent = '—';
-  elements.badgeWritebackResult.textContent = '—';
+  if (elements.badgeCacheResult) elements.badgeCacheResult.textContent = '—';
+  if (elements.badgeClassifyResult) elements.badgeClassifyResult.textContent = '—';
+  if (elements.badgeLlmResult) elements.badgeLlmResult.textContent = '—';
+  if (elements.badgeWritebackResult) elements.badgeWritebackResult.textContent = '—';
 }
 
 function updateVisualizer(resp) {
   resetVisualizer();
 
-  // Step 1: Cache
-  elements.stepCache.classList.add('active-step');
-  elements.badgeCacheResult.textContent = resp.from_cache ? 'HIT' : 'MISS';
+  const fromCache = resp.from_cache === true;
+  const qType = (resp.query_type || 'simple').toUpperCase();
 
-  if (resp.from_cache) {
-    elements.badgeCacheResult.style.color = '#f59e0b';
-    return; // Bypass subsequent steps on cache hit
+  // Step 1: Cache
+  if (elements.stepCache) elements.stepCache.classList.add('active-step');
+  if (elements.badgeCacheResult) {
+    elements.badgeCacheResult.textContent = fromCache ? 'HIT' : 'MISS';
+    elements.badgeCacheResult.style.color = fromCache ? '#f59e0b' : 'inherit';
+  }
+
+  if (fromCache) {
+    // Cache hit: direct return, write-back records to session memory
+    if (elements.stepWriteback) elements.stepWriteback.classList.add('active-step');
+    if (elements.badgeWritebackResult) elements.badgeWritebackResult.textContent = 'Session Memory';
+    return;
   }
 
   // Step 2: Classifier
-  elements.stepClassify.classList.add('active-step');
-  const qType = (resp.query_type || 'simple').toUpperCase();
-  elements.badgeClassifyResult.textContent = qType;
+  if (elements.stepClassify) elements.stepClassify.classList.add('active-step');
+  if (elements.badgeClassifyResult) elements.badgeClassifyResult.textContent = qType;
 
   // Step 3: Branch
-  if (qType === 'SIMPLE') {
+  if (qType === 'SIMPLE' && elements.branchSimple) {
     elements.branchSimple.classList.add('active-branch');
-  } else if (qType === 'CODE') {
+  } else if (qType === 'CODE' && elements.branchCode) {
     elements.branchCode.classList.add('active-branch');
-  } else if (qType === 'MEMORY') {
+  } else if (qType === 'MEMORY' && elements.branchMemory) {
     elements.branchMemory.classList.add('active-branch');
   }
 
   // Step 4: LLM
-  elements.stepLlm.classList.add('active-step');
-  elements.badgeLlmResult.textContent = `${Math.round(resp.latency_ms || 0)}ms`;
+  if (elements.stepLlm) elements.stepLlm.classList.add('active-step');
+  if (elements.badgeLlmResult) {
+    elements.badgeLlmResult.textContent = `${Math.round(resp.latency_ms || 0)}ms`;
+  }
 
   // Step 5: Write-back
-  elements.stepWriteback.classList.add('active-step');
-  elements.badgeWritebackResult.textContent = qType === 'SIMPLE' ? 'Cached' : 'Session Memory';
+  if (elements.stepWriteback) elements.stepWriteback.classList.add('active-step');
+  if (elements.badgeWritebackResult) {
+    elements.badgeWritebackResult.textContent = qType === 'SIMPLE' ? 'Cache + Session' : 'Session Memory';
+  }
 }
 
 // ── Message Renderers ─────────────────────────────────────────────────────────
@@ -459,9 +594,9 @@ function renderSkeletonMessage() {
   row.innerHTML = `
     <div class="message-avatar">⚡</div>
     <div class="message-bubble">
-      <div class="skeleton-line" style="width: 40%;"></div>
-      <div class="skeleton-line" style="width: 85%;"></div>
-      <div class="skeleton-line" style="width: 65%;"></div>
+      <div class="skeleton-line" style="width: 35%;"></div>
+      <div class="skeleton-line" style="width: 80%;"></div>
+      <div class="skeleton-line" style="width: 60%;"></div>
     </div>
   `;
   elements.messagesContainer.appendChild(row);
@@ -489,13 +624,31 @@ function renderAssistantMessage(data, fallbackLatency) {
   if (sources.length > 0) {
     const itemsHtml = sources
       .map((s, idx) => {
-        return `<div class="evidence-item"><strong>[Chunk ${idx + 1}]</strong>\n${escapeHtml(s)}</div>`;
+        let tagClass = 'evidence-source-turn';
+        let tagLabel = 'Turn';
+        if (s.includes('.py') || s.includes('::') || qType === 'code') {
+          tagClass = 'evidence-source-code';
+          tagLabel = 'Code AST';
+        } else if (s.includes('.md') || s.includes('.txt') || s.includes('.pdf') || s.toLowerCase().includes('pricing')) {
+          tagClass = 'evidence-source-doc';
+          tagLabel = 'Document';
+        }
+
+        return `
+          <div class="evidence-item">
+            <div>
+              <span class="evidence-source-tag ${tagClass}">${tagLabel}</span>
+              <strong>Chunk ${idx + 1}:</strong>
+            </div>
+            ${escapeHtml(s)}
+          </div>
+        `;
       })
       .join('');
 
     evidenceHtml = `
       <div class="evidence-drawer">
-        <div class="evidence-header" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'block' ? 'none' : 'block'">
+        <div class="evidence-header" onclick="toggleEvidence(this)">
           <span>🔍 Ground-Truth Retrieval Evidence (${sources.length} sources)</span>
           <span>▼ Toggle Context</span>
         </div>
@@ -506,6 +659,8 @@ function renderAssistantMessage(data, fallbackLatency) {
     `;
   }
 
+  const rawResponse = data.response || '';
+
   row.innerHTML = `
     <div class="message-avatar">⚡</div>
     <div class="message-bubble">
@@ -513,14 +668,51 @@ function renderAssistantMessage(data, fallbackLatency) {
         <span class="telemetry-tag ${typeBadgeClass}">${qType.toUpperCase()}</span>
         <span class="telemetry-tag ${cacheBadgeClass}">${cacheText}</span>
         <span class="telemetry-tag telemetry-latency">⏱ ${latency} ms</span>
+        <button class="btn-copy-msg" onclick="copyMessageText(this)" title="Copy markdown to clipboard">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          Copy
+        </button>
       </div>
-      <div class="message-content">${formatMarkdown(data.response || '')}</div>
+      <div class="message-content" data-raw="${escapeAttribute(rawResponse)}">${formatMarkdown(rawResponse)}</div>
       ${evidenceHtml}
     </div>
   `;
 
   elements.messagesContainer.appendChild(row);
 }
+
+window.toggleEvidence = function (headerEl) {
+  const content = headerEl.nextElementSibling;
+  if (!content) return;
+  const isShown = content.style.display === 'flex' || content.style.display === 'block';
+  content.style.display = isShown ? 'none' : 'flex';
+};
+
+window.copyMessageText = function (btn) {
+  const bubble = btn.closest('.message-bubble');
+  const contentEl = bubble ? bubble.querySelector('.message-content') : null;
+  const text = contentEl ? (contentEl.getAttribute('data-raw') || contentEl.textContent) : '';
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      btn.classList.add('copied');
+      btn.innerHTML = '✓ Copied';
+      setTimeout(() => {
+        btn.classList.remove('copied');
+        btn.innerHTML = `
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          Copy
+        `;
+      }, 2000);
+    });
+  }
+};
 
 function renderErrorMessage(errText) {
   const row = document.createElement('div');
@@ -529,7 +721,7 @@ function renderErrorMessage(errText) {
     <div class="message-avatar" style="background: var(--accent-rose);">!</div>
     <div class="message-bubble" style="border-color: rgba(244, 63, 94, 0.3); background: rgba(244, 63, 94, 0.08);">
       <div class="message-content" style="color: #fda4af;">
-        <strong>System Notice:</strong> ${escapeHtml(errText)}
+        <strong>ACEF Notice:</strong> ${escapeHtml(errText)}
       </div>
     </div>
   `;
@@ -538,34 +730,43 @@ function renderErrorMessage(errText) {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function scrollToBottom() {
-  elements.messagesContainer.scrollTop = elements.messagesContainer.scrollHeight;
+  if (elements.messagesContainer) {
+    elements.messagesContainer.scrollTop = elements.messagesContainer.scrollHeight;
+  }
 }
 
 function setDockStatus(msg) {
-  elements.dockStatus.textContent = msg;
+  if (elements.dockStatus) {
+    elements.dockStatus.textContent = msg;
+  }
 }
 
 function escapeHtml(str) {
+  if (!str) return '';
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
 }
 
+function escapeAttribute(str) {
+  if (!str) return '';
+  return str.replace(/"/g, '&quot;');
+}
+
 function formatMarkdown(text) {
   if (!text) return '';
 
-  // Escape HTML first
   let out = escapeHtml(text);
 
-  // Fenced Code blocks ```lang\ncode\n```
+  // Fenced Code blocks
   out = out.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (match, lang, code) => {
     return `<pre><code class="language-${lang}">${code.trim()}</code></pre>`;
   });
 
-  // Inline code `code`
+  // Inline code
   out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
 
-  // Bold **text**
+  // Bold
   out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
 
   // Headings
@@ -576,7 +777,7 @@ function formatMarkdown(text) {
   // Unordered list items
   out = out.replace(/^\- (.*$)/gim, '<li style="margin-left: 18px;">$1</li>');
 
-  // Convert newlines to breaks where appropriate
+  // Convert newlines
   out = out.replace(/\n\n/g, '<p></p>');
   out = out.replace(/\n/g, '<br>');
 
@@ -584,7 +785,7 @@ function formatMarkdown(text) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// In-App Knowledge Graph Visualizer Engine (Force-Directed Canvas)
+// Force-Directed Knowledge Graph Visualizer Engine
 // ─────────────────────────────────────────────────────────────────────────────
 const graphVisualizer = {
   initialized: false,
@@ -620,10 +821,12 @@ const graphVisualizer = {
   filters: {
     file: true,
     function: true,
+    method: true,
     class: true,
     CALLS: true,
     DEFINES: true,
     IMPORTS: true,
+    CONTAINS: true,
   },
   searchQuery: '',
 
@@ -665,7 +868,10 @@ const graphVisualizer = {
 
   async loadData() {
     const loading = document.getElementById('graph-loading');
-    if (loading) loading.style.display = 'flex';
+    if (loading) {
+      loading.innerHTML = `<div class="loading-spinner"></div><span>Fetching graph topology from Neo4j...</span>`;
+      loading.style.display = 'flex';
+    }
 
     try {
       const res = await fetch('/graph/data');
@@ -679,8 +885,20 @@ const graphVisualizer = {
         loading.innerHTML = `<span style="color: #fda4af;">Failed to load graph from Neo4j (${escapeHtml(err.message)})</span>`;
       }
     } finally {
-      if (loading && this.nodes.length > 0) {
-        loading.style.display = 'none';
+      if (loading) {
+        if (this.nodes.length > 0) {
+          loading.style.display = 'none';
+        } else {
+          loading.innerHTML = `
+            <div style="text-align: center; max-width: 320px; padding: 24px; background: rgba(15, 23, 42, 0.85); border: 1px solid var(--border-subtle); border-radius: var(--radius-md);">
+              <div style="font-size: 2.2rem; margin-bottom: 8px;">🕸️</div>
+              <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 6px; font-size: 1rem;">Knowledge Graph is Empty</div>
+              <div style="font-size: 0.82rem; color: var(--text-muted); margin-bottom: 16px; line-height: 1.4;">No code symbols found in Neo4j. Ingest a codebase in Ingestion Studio to build the AST graph.</div>
+              <button class="btn btn-primary btn-xs" onclick="window.switchView('chat')">Go to Ingestion Studio</button>
+            </div>
+          `;
+          loading.style.display = 'flex';
+        }
       }
     }
   },
@@ -695,12 +913,13 @@ const graphVisualizer = {
 
     let countFiles = 0;
     let countFuncs = 0;
+    let countMethods = 0;
     let countClasses = 0;
     let countCalls = 0;
     let countDefines = 0;
     let countImports = 0;
+    let countContains = 0;
 
-    // Radius, colors, and layout setup
     const total = rawNodes.length;
     const spreadRadius = Math.max(300, Math.sqrt(total) * 45);
 
@@ -710,17 +929,39 @@ const graphVisualizer = {
 
       const isFile = rn.type === 'File';
       const isClass = rn.kind === 'class';
-      const isFunc = !isFile && !isClass;
+      const isMethod = rn.kind === 'method';
+      const isFunc = !isFile && !isClass && !isMethod;
 
       if (isFile) countFiles++;
       else if (isClass) countClasses++;
+      else if (isMethod) countMethods++;
       else countFuncs++;
+
+      let nodeColor = '#10b981'; // Function: emerald
+      let nodeStroke = '#6ee7b7';
+      let nodeRadius = 10;
+
+      if (isFile) {
+        nodeColor = '#06b6d4'; // Cyan
+        nodeStroke = '#67e8f9';
+        nodeRadius = 16;
+      } else if (isClass) {
+        nodeColor = '#a855f7'; // Purple
+        nodeStroke = '#d8b4fe';
+        nodeRadius = 14;
+      } else if (isMethod) {
+        nodeColor = '#14b8a6'; // Teal
+        nodeStroke = '#5eead4';
+        nodeRadius = 10;
+      }
 
       const nodeObj = {
         id: rn.id,
         name: rn.name || 'Unnamed',
+        qualname: rn.qualname || rn.name || 'Unnamed',
         type: rn.type,
         kind: rn.kind || rn.type.toLowerCase(),
+        parent_class: rn.parent_class || '',
         docstring: rn.docstring || '',
         file_path: rn.file_path || '',
         lineno: rn.lineno || 0,
@@ -730,13 +971,14 @@ const graphVisualizer = {
         y: Math.sin(angle) * dist + (Math.random() - 0.5) * 40,
         vx: 0,
         vy: 0,
-        radius: isFile ? 16 : (isClass ? 13 : 10),
-        color: isFile ? '#06b6d4' : (isClass ? '#a855f7' : '#10b981'),
-        strokeColor: isFile ? '#67e8f9' : (isClass ? '#d8b4fe' : '#6ee7b7'),
+        radius: nodeRadius,
+        color: nodeColor,
+        strokeColor: nodeStroke,
         outgoingCalls: [],
         incomingCalls: [],
         defines: [],
         imports: [],
+        contains: [],
       };
 
       this.nodeMap.set(rn.id, nodeObj);
@@ -764,26 +1006,28 @@ const graphVisualizer = {
         } else if (rl.type === 'IMPORTS') {
           countImports++;
           srcNode.imports.push(tgtNode);
+        } else if (rl.type === 'CONTAINS') {
+          countContains++;
+          srcNode.contains.push(tgtNode);
         }
       }
     });
 
     // Update Counter Badges
-    const elFiles = document.getElementById('count-files');
-    const elFuncs = document.getElementById('count-functions');
-    const elClasses = document.getElementById('count-classes');
-    const elCalls = document.getElementById('count-calls');
-    const elDefines = document.getElementById('count-defines');
-    const elImports = document.getElementById('count-imports');
+    const updateCount = (id, val) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = val;
+    };
 
-    if (elFiles) elFiles.textContent = countFiles;
-    if (elFuncs) elFuncs.textContent = countFuncs;
-    if (elClasses) elClasses.textContent = countClasses;
-    if (elCalls) elCalls.textContent = countCalls;
-    if (elDefines) elDefines.textContent = countDefines;
-    if (elImports) elImports.textContent = countImports;
+    updateCount('count-files', countFiles);
+    updateCount('count-functions', countFuncs);
+    updateCount('count-methods', countMethods);
+    updateCount('count-classes', countClasses);
+    updateCount('count-calls', countCalls);
+    updateCount('count-defines', countDefines);
+    updateCount('count-imports', countImports);
+    updateCount('count-contains', countContains);
 
-    // Reset View to Center
     this.resetView();
   },
 
@@ -809,7 +1053,7 @@ const graphVisualizer = {
     const count = visibleNodes.length;
     if (count === 0) return;
 
-    // 1. Repulsion between visible node pairs
+    // 1. Repulsion
     for (let i = 0; i < count; i++) {
       const n1 = visibleNodes[i];
       for (let j = i + 1; j < count; j++) {
@@ -817,7 +1061,7 @@ const graphVisualizer = {
         const dx = n2.x - n1.x;
         const dy = n2.y - n1.y;
         const distSq = dx * dx + dy * dy || 1;
-        if (distSq < 250000) { // Limit repulsion radius to ~500px for speed
+        if (distSq < 250000) {
           const dist = Math.sqrt(distSq);
           const force = 1400 / (distSq + 50);
           const fx = (dx / dist) * force;
@@ -838,7 +1082,12 @@ const graphVisualizer = {
       const dx = t.x - s.x;
       const dy = t.y - s.y;
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const targetDist = l.type === 'DEFINES' ? 65 : (l.type === 'CALLS' ? 100 : 130);
+      let targetDist = 100;
+      if (l.type === 'CONTAINS') targetDist = 50;
+      else if (l.type === 'DEFINES') targetDist = 65;
+      else if (l.type === 'CALLS') targetDist = 110;
+      else if (l.type === 'IMPORTS') targetDist = 135;
+
       const force = (dist - targetDist) * 0.035;
       const fx = (dx / dist) * force;
       const fy = (dy / dist) * force;
@@ -851,7 +1100,7 @@ const graphVisualizer = {
 
     // 3. Center gravity pull & velocity damping
     visibleNodes.forEach((n) => {
-      if (n === this.draggedNode) return; // Don't move if dragging
+      if (n === this.draggedNode) return;
 
       n.vx += (0 - n.x) * 0.0012;
       n.vy += (0 - n.y) * 0.0012;
@@ -866,8 +1115,9 @@ const graphVisualizer = {
 
   isNodeVisible(n) {
     if (n.type === 'File' && !this.filters.file) return false;
-    if (n.kind === 'function' && !this.filters.function) return false;
     if (n.kind === 'class' && !this.filters.class) return false;
+    if (n.kind === 'method' && !this.filters.method) return false;
+    if (n.kind === 'function' && !this.filters.function) return false;
     return true;
   },
 
@@ -876,6 +1126,7 @@ const graphVisualizer = {
     if (l.type === 'CALLS' && !this.filters.CALLS) return false;
     if (l.type === 'DEFINES' && !this.filters.DEFINES) return false;
     if (l.type === 'IMPORTS' && !this.filters.IMPORTS) return false;
+    if (l.type === 'CONTAINS' && !this.filters.CONTAINS) return false;
     return true;
   },
 
@@ -889,7 +1140,6 @@ const graphVisualizer = {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-    // Apply High-DPI, Center offset, Pan, and Zoom
     ctx.scale(this.dpr, this.dpr);
     ctx.translate(width / 2 + this.panX, height / 2 + this.panY);
     ctx.scale(this.zoom, this.zoom);
@@ -928,16 +1178,20 @@ const graphVisualizer = {
         ctx.strokeStyle = isAttached ? '#c4b5fd' : (isDimmed ? 'rgba(139, 92, 246, 0.06)' : 'rgba(139, 92, 246, 0.28)');
         ctx.lineWidth = isAttached ? 2.0 : 1.0;
         ctx.setLineDash([4, 4]);
+      } else if (l.type === 'CONTAINS') {
+        ctx.strokeStyle = isAttached ? '#fcd34d' : (isDimmed ? 'rgba(245, 158, 11, 0.06)' : 'rgba(245, 158, 11, 0.30)');
+        ctx.lineWidth = isAttached ? 2.0 : 1.0;
+        ctx.setLineDash([2, 4]);
       }
       ctx.stroke();
 
-      // Draw directional arrow on CALLS edges
+      // Directional arrow on CALLS edges
       if (l.type === 'CALLS' && (!isDimmed || isAttached)) {
         this.drawArrow(ctx, l.source.x, l.source.y, l.target.x, l.target.y, l.target.radius, ctx.strokeStyle);
       }
     });
 
-    ctx.setLineDash([]); // Reset line dash
+    ctx.setLineDash([]);
 
     // ── 2. Draw Nodes ─────────────────────────────────────────────────────────
     const query = this.searchQuery.toLowerCase().trim();
@@ -948,18 +1202,16 @@ const graphVisualizer = {
       const isHovered = n === this.hoveredNode;
       const isSelected = n === this.selectedNode;
       const isConnected = highlightNode ? connectedSet.has(n.id) : true;
-      const isMatch = query && n.name.toLowerCase().includes(query);
+      const isMatch = query && (n.name.toLowerCase().includes(query) || (n.qualname && n.qualname.toLowerCase().includes(query)));
 
       ctx.save();
       ctx.globalAlpha = (!highlightNode || isConnected || isMatch) ? 1.0 : 0.18;
 
-      // Glowing Halo for hover / selection / search match
       if (isHovered || isSelected || isMatch) {
         ctx.shadowColor = isMatch ? '#f59e0b' : n.strokeColor;
         ctx.shadowBlur = isMatch ? 24 : 18;
       }
 
-      // Outer border circle
       ctx.beginPath();
       ctx.arc(n.x, n.y, n.radius + (isHovered ? 3 : (isSelected ? 2 : 0)), 0, Math.PI * 2);
       ctx.fillStyle = n.color;
@@ -969,7 +1221,6 @@ const graphVisualizer = {
       ctx.strokeStyle = isMatch ? '#f59e0b' : n.strokeColor;
       ctx.stroke();
 
-      // Node Label (rendered crisp with pill background)
       if (this.zoom >= 0.65 || isHovered || isSelected || isMatch || n.type === 'File') {
         this.drawNodeLabel(ctx, n, isHovered || isSelected || isMatch);
       }
@@ -986,7 +1237,6 @@ const graphVisualizer = {
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist < targetRadius + 15) return;
 
-    // Arrow position slightly outside node circle
     const arrowDist = dist - (targetRadius + 4);
     const arrowX = fromX + (dx / dist) * arrowDist;
     const arrowY = fromY + (dy / dist) * arrowDist;
@@ -1019,7 +1269,6 @@ const graphVisualizer = {
     const labelX = n.x;
     const labelY = n.y + n.radius + 12;
 
-    // Background badge pill for readability
     ctx.fillStyle = isEmphasized ? 'rgba(15, 23, 42, 0.95)' : 'rgba(10, 15, 26, 0.8)';
     ctx.beginPath();
     ctx.roundRect(labelX - textWidth / 2 - 4, labelY - fontSize + 1, textWidth + 8, fontSize + 5, 4);
@@ -1028,14 +1277,12 @@ const graphVisualizer = {
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    // Text label
     ctx.fillStyle = isEmphasized ? '#fff' : '#cbd5e1';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(label, labelX, labelY - 1);
   },
 
-  // ── Coordinates and Picking ─────────────────────────────────────────────────
   screenToWorld(screenX, screenY) {
     const centerOffsetX = this.width / 2 + this.panX;
     const centerOffsetY = this.height / 2 + this.panY;
@@ -1046,7 +1293,6 @@ const graphVisualizer = {
 
   findNodeAt(screenX, screenY) {
     const { x, y } = this.screenToWorld(screenX, screenY);
-    // Search in reverse so top-drawn nodes take precedence
     for (let i = this.nodes.length - 1; i >= 0; i--) {
       const n = this.nodes[i];
       if (!this.isNodeVisible(n)) continue;
@@ -1060,7 +1306,6 @@ const graphVisualizer = {
     return null;
   },
 
-  // ── Canvas Mouse & Touch Events ─────────────────────────────────────────────
   setupCanvasEvents() {
     const canvas = this.canvas;
     const viewport = document.getElementById('graph-viewport');
@@ -1131,7 +1376,6 @@ const graphVisualizer = {
       }
     });
 
-    // Zooming with mouse wheel centered at cursor
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
       const rect = canvas.getBoundingClientRect();
@@ -1141,7 +1385,6 @@ const graphVisualizer = {
       const zoomFactor = e.deltaY < 0 ? 1.15 : 0.87;
       const newZoom = Math.max(0.15, Math.min(4.0, this.zoom * zoomFactor));
 
-      // Zoom towards mouse pointer
       const centerOffsetX = this.width / 2 + this.panX;
       const centerOffsetY = this.height / 2 + this.panY;
       const worldX = (mouseX - centerOffsetX) / this.zoom;
@@ -1153,18 +1396,19 @@ const graphVisualizer = {
     }, { passive: false });
   },
 
-  // ── Node Inspector Drawer ───────────────────────────────────────────────────
   selectNode(node) {
     this.selectedNode = node;
     const inspector = document.getElementById('node-inspector');
     if (!inspector) return;
 
-    // Fill Inspector Elements
     const elType = document.getElementById('inspector-type');
     const elName = document.getElementById('inspector-name');
+    const elQualname = document.getElementById('inspector-qualname');
     const elFile = document.getElementById('inspector-file');
     const elLines = document.getElementById('inspector-lines');
     const rowLines = document.getElementById('row-lineno');
+    const rowParentClass = document.getElementById('row-parent-class');
+    const elParentClass = document.getElementById('inspector-parent-class');
 
     const secDocstring = document.getElementById('section-docstring');
     const elDocstring = document.getElementById('inspector-docstring');
@@ -1184,13 +1428,31 @@ const graphVisualizer = {
     const groupImports = document.getElementById('group-imports');
     const chipsImports = document.getElementById('chips-imports');
 
+    const groupContains = document.getElementById('group-contains');
+    const chipsContains = document.getElementById('chips-contains');
+
     // Type Badge & Name
     elType.className = `inspector-type-badge type-${node.kind}`;
-    elType.textContent = node.type === 'File' ? 'File' : (node.kind === 'class' ? 'Class' : 'Function');
-    elName.textContent = node.name;
+    let typeName = 'Function';
+    if (node.type === 'File') typeName = 'File';
+    else if (node.kind === 'class') typeName = 'Class';
+    else if (node.kind === 'method') typeName = 'Method';
+    elType.textContent = typeName;
 
-    // File and lines
+    elName.textContent = node.name;
+    if (elQualname) {
+      elQualname.textContent = node.qualname && node.qualname !== node.name ? node.qualname : '';
+    }
+
+    // File, Enclosing Class, Line range
     elFile.textContent = node.file_path || node.name;
+    if (node.parent_class && rowParentClass && elParentClass) {
+      rowParentClass.style.display = 'flex';
+      elParentClass.textContent = node.parent_class;
+    } else if (rowParentClass) {
+      rowParentClass.style.display = 'none';
+    }
+
     if (node.lineno > 0) {
       if (rowLines) rowLines.style.display = 'flex';
       elLines.textContent = `L${node.lineno} – L${node.end_lineno}`;
@@ -1214,7 +1476,7 @@ const graphVisualizer = {
       secSource.style.display = 'none';
     }
 
-    // Connected Relationships Chips
+    // Relationships chips
     const populateChips = (container, group, items) => {
       container.innerHTML = '';
       if (!items || items.length === 0) {
@@ -1238,6 +1500,9 @@ const graphVisualizer = {
     populateChips(chipsCalledBy, groupCalledBy, node.incomingCalls);
     populateChips(chipsDefines, groupDefines, node.defines);
     populateChips(chipsImports, groupImports, node.imports);
+    if (chipsContains && groupContains) {
+      populateChips(chipsContains, groupContains, node.contains);
+    }
 
     inspector.style.display = 'flex';
   },
@@ -1248,9 +1513,7 @@ const graphVisualizer = {
     this.selectedNode = node;
   },
 
-  // ── Toolbar Controls Setup ──────────────────────────────────────────────────
   setupControls() {
-    // Close Inspector
     const btnClose = document.getElementById('btn-close-inspector');
     if (btnClose) {
       btnClose.addEventListener('click', () => {
@@ -1260,7 +1523,6 @@ const graphVisualizer = {
       });
     }
 
-    // Zoom Buttons
     const btnZoomIn = document.getElementById('btn-graph-zoom-in');
     const btnZoomOut = document.getElementById('btn-graph-zoom-out');
     const btnReset = document.getElementById('btn-graph-reset');
@@ -1281,7 +1543,7 @@ const graphVisualizer = {
       });
     }
 
-    // Physics Toggle
+    this.btnPhysics = document.getElementById('btn-graph-physics');
     if (this.btnPhysics) {
       this.btnPhysics.addEventListener('click', () => {
         this.physicsRunning = !this.physicsRunning;
@@ -1289,11 +1551,17 @@ const graphVisualizer = {
       });
     }
 
-    // Refresh Graph Data from Neo4j
     const btnRefresh = document.getElementById('btn-graph-refresh');
     if (btnRefresh) {
       btnRefresh.addEventListener('click', () => {
         this.loadData();
+      });
+    }
+
+    const btnClearGraph = document.getElementById('btn-graph-clear');
+    if (btnClearGraph) {
+      btnClearGraph.addEventListener('click', () => {
+        this.clearGraph();
       });
     }
 
@@ -1314,6 +1582,8 @@ const graphVisualizer = {
     });
 
     // Search Input
+    this.searchInput = document.getElementById('graph-search-input');
+    this.searchClearBtn = document.getElementById('graph-search-clear');
     if (this.searchInput) {
       this.searchInput.addEventListener('input', (e) => {
         this.searchQuery = e.target.value.trim();
@@ -1326,7 +1596,9 @@ const graphVisualizer = {
         if (e.key === 'Enter') {
           e.preventDefault();
           const query = this.searchQuery.toLowerCase();
-          const match = this.nodes.find((n) => this.isNodeVisible(n) && n.name.toLowerCase().includes(query));
+          const match = this.nodes.find(
+            (n) => this.isNodeVisible(n) && (n.name.toLowerCase().includes(query) || (n.qualname && n.qualname.toLowerCase().includes(query)))
+          );
           if (match) {
             this.focusOnNode(match);
             this.selectNode(match);
@@ -1337,10 +1609,85 @@ const graphVisualizer = {
 
     if (this.searchClearBtn) {
       this.searchClearBtn.addEventListener('click', () => {
-        this.searchInput.value = '';
+        if (this.searchInput) this.searchInput.value = '';
         this.searchQuery = '';
         this.searchClearBtn.style.display = 'none';
       });
+    }
+  },
+
+  async clearGraph() {
+    if (!confirm('Are you sure you want to delete all nodes and relationships from the Neo4j Knowledge Graph? This action cannot be undone.')) {
+      return;
+    }
+
+    const btnClearToolbar = document.getElementById('btn-graph-clear');
+    const btnClearSidebar = document.getElementById('btn-clear-graph-sidebar');
+    if (btnClearToolbar) btnClearToolbar.disabled = true;
+    if (btnClearSidebar) btnClearSidebar.disabled = true;
+
+    const loading = document.getElementById('graph-loading');
+    if (loading) {
+      loading.innerHTML = `<div class="loading-spinner"></div><span>Deleting Neo4j graph nodes and relationships...</span>`;
+      loading.style.display = 'flex';
+    }
+
+    try {
+      const res = await fetch('/graph/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+
+      this.nodes = [];
+      this.links = [];
+      this.nodeMap.clear();
+      this.selectedNode = null;
+      this.hoveredNode = null;
+
+      const inspector = document.getElementById('node-inspector');
+      if (inspector) inspector.style.display = 'none';
+
+      ['count-files', 'count-functions', 'count-methods', 'count-classes', 'count-calls', 'count-defines', 'count-imports', 'count-contains'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = '0';
+      });
+
+      if (this.searchInput) this.searchInput.value = '';
+      this.searchQuery = '';
+      if (this.searchClearBtn) this.searchClearBtn.style.display = 'none';
+
+      if (elements.codeIngestStatus) {
+        showStatus(elements.codeIngestStatus, data.message || 'Knowledge graph cleared successfully.', 'success');
+      }
+      setDockStatus(`Knowledge graph cleared (${data.nodes_deleted || 0} nodes deleted)`);
+
+      this.render();
+
+      if (loading) {
+        loading.innerHTML = `
+          <div style="text-align: center; max-width: 320px; padding: 24px; background: rgba(15, 23, 42, 0.85); border: 1px solid var(--border-subtle); border-radius: var(--radius-md);">
+            <div style="font-size: 2.2rem; margin-bottom: 8px;">🗑️</div>
+            <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 6px; font-size: 1rem;">Graph Cleared</div>
+            <div style="font-size: 0.82rem; color: var(--text-muted); margin-bottom: 16px; line-height: 1.4;">Deleted ${data.nodes_deleted || 0} nodes. Ingest a codebase in Ingestion Studio to build a new graph.</div>
+            <button class="btn btn-primary btn-xs" onclick="window.switchView('chat')">Go to Ingestion Studio</button>
+          </div>
+        `;
+        loading.style.display = 'flex';
+      }
+    } catch (err) {
+      console.error('Failed to clear graph:', err);
+      alert('Error clearing graph: ' + err.message);
+      if (loading) {
+        loading.innerHTML = `<span style="color: #fda4af;">Failed to clear graph: ${escapeHtml(err.message)}</span>`;
+      }
+    } finally {
+      if (btnClearToolbar) btnClearToolbar.disabled = false;
+      if (btnClearSidebar) btnClearSidebar.disabled = false;
     }
   },
 };

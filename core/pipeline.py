@@ -136,6 +136,7 @@ class Pipeline:
             session_turn_count=turn_count,
             known_symbols=self.corpus_index.symbols,
             doc_similarity_fn=doc_probe,
+            doc_similarity_threshold=self.settings.doc_route_threshold,
             last_turn_type=last_turn,
         )
         query_type = self.classifier.classify(request.query, ctx)

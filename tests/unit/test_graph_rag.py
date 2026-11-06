@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from unittest.mock import MagicMock
 from pathlib import Path
 from modules.graph_rag import _extract_search_terms, GraphRAG
-from ingestion.code_ingest import _parse_file, ingest_codebase
+from ingestion.code_ingest import _parse_file, ingest_codebase, make_symbol_id, make_file_id
 
 
 class TestExtractSearchTerms:
@@ -126,10 +126,9 @@ class TestParseFile:
         mock_session = MagicMock()
         mock_driver.session.return_value.__enter__.return_value = mock_session
 
-        # 1. Full-text search returns symbol anchor
-        mock_session.run.side_effect = [
-            [{"name": "login", "score": 1.5}],  # fulltext anchor
-            [{  # traversal record
+        # 1. Batched full-text search and graph traversal returns enriched record
+        mock_session.run.return_value = [
+            {
                 "name": "login",
                 "kind": "function",
                 "docstring": "Authenticate user.",
@@ -137,9 +136,12 @@ class TestParseFile:
                 "end_lineno": 18,
                 "source_code": "def login():\n    return True",
                 "file_path": "auth.py",
+                "score": 1.5,
                 "calls": ["hash_password"],
                 "called_by": ["main"],
-            }],
+                "file_imports": ["utils"],
+                "parent_class": None,
+            }
         ]
 
         rag = GraphRAG(mock_driver)
@@ -224,4 +226,335 @@ class TestCodeReingestion:
         assert ".txt" in summary["skipped_extensions"]
         assert ".json" in summary["skipped_extensions"]
         assert ".css" in summary["skipped_extensions"]
+
+
+class TestGraphRAGEnhancements:
+    """Tests for the phased GraphRAG improvements."""
+
+    def test_attribute_calls_extracted(self, tmp_path):
+        code_file = tmp_path / "service.py"
+        code_file.write_text(
+            "class UserService:\n"
+            "    def update_email(self, email):\n"
+            "        self.validate(email)\n"
+            "        db.execute('UPDATE')\n"
+            "    def validate(self, email):\n"
+            "        pass\n",
+            encoding="utf-8",
+        )
+        res = _parse_file(code_file)
+        update_sym = [s for s in res["symbols"] if s["name"] == "update_email"][0]
+        assert "validate" in update_sym["calls"]
+        assert "execute" in update_sym["calls"]
+
+    def test_class_method_hierarchy_extracted(self, tmp_path):
+        code_file = tmp_path / "models.py"
+        code_file.write_text(
+            "class Account:\n"
+            "    def deposit(self, amt):\n"
+            "        return amt\n",
+            encoding="utf-8",
+        )
+        res = _parse_file(code_file)
+        account_cls = [s for s in res["symbols"] if s["name"] == "Account"][0]
+        deposit_m = [s for s in res["symbols"] if s["name"] == "deposit"][0]
+        assert account_cls["kind"] == "class"
+        assert deposit_m["kind"] == "method"
+        assert deposit_m["parent_class"] == "Account"
+
+    def test_contains_relationships_in_ingestion(self, tmp_path):
+        code_file = tmp_path / "models.py"
+        code_file.write_text(
+            "class Account:\n"
+            "    def deposit(self, amt):\n"
+            "        pass\n",
+            encoding="utf-8",
+        )
+        mock_driver = MagicMock()
+        mock_session = MagicMock()
+        mock_driver.session.return_value.__enter__.return_value = mock_session
+
+        summary = ingest_codebase(str(tmp_path), mock_driver)
+        assert summary["contains"] == 1
+        executed_queries = [call[0][0] for call in mock_session.run.call_args_list]
+        assert any("UNWIND $contains" in q and "[:CONTAINS]->" in q for q in executed_queries)
+
+    def test_retrieve_formats_parent_class_and_imports(self):
+        mock_driver = MagicMock()
+        mock_session = MagicMock()
+        mock_driver.session.return_value.__enter__.return_value = mock_session
+
+        mock_session.run.return_value = [
+            {
+                "name": "deposit",
+                "kind": "method",
+                "parent_class": "Account",
+                "docstring": "Deposit funds.",
+                "lineno": 5,
+                "end_lineno": 8,
+                "source_code": "def deposit(self, amt):\n    return amt",
+                "file_path": "bank/account.py",
+                "score": 2.1,
+                "calls": ["audit_log"],
+                "called_by": ["transfer"],
+                "file_imports": ["utils.py", "audit.py"],
+            }
+        ]
+
+        rag = GraphRAG(mock_driver, max_hops=3, min_score=0.8)
+        chunks = rag.retrieve("How to deposit?")
+
+        assert len(chunks) == 1
+        text = chunks[0].text
+        assert "method of Account" in text
+        assert "Relevance score: 2.10" in text
+        assert "File imports: utils.py, audit.py" in text
+        assert "Calls: audit_log" in text
+        assert "Called by: transfer" in text
+        assert "Source:\n```python\ndef deposit(self, amt):" in text
+
+    def test_contains_scoped_by_class_id_no_cross_linking(self, tmp_path):
+        """P1 verification: Same-named methods in different classes must not cross-link."""
+        code_file = tmp_path / "models.py"
+        code_file.write_text(
+            "class A:\n"
+            "    def run(self):\n"
+            "        pass\n"
+            "class B:\n"
+            "    def run(self):\n"
+            "        pass\n",
+            encoding="utf-8",
+        )
+        mock_driver = MagicMock()
+        mock_session = MagicMock()
+        mock_driver.session.return_value.__enter__.return_value = mock_session
+
+        summary = ingest_codebase(str(tmp_path), mock_driver)
+        assert summary["contains"] == 2
+
+        # Extract the $contains parameter passed to session.run
+        contains_calls = [
+            call[1]["contains"]
+            for call in mock_session.run.call_args_list
+            if "contains" in call[1]
+        ]
+        assert len(contains_calls) == 1
+        edges = contains_calls[0]
+        # Must be exactly: (A -> A.run) and (B -> B.run)
+        edge_pairs = {(e["parent_id"], e["child_id"]) for e in edges}
+        a_id = make_symbol_id(str(tmp_path), "models.py", "A")
+        a_run_id = make_symbol_id(str(tmp_path), "models.py", "A.run")
+        b_id = make_symbol_id(str(tmp_path), "models.py", "B")
+        b_run_id = make_symbol_id(str(tmp_path), "models.py", "B.run")
+
+        assert (a_id, a_run_id) in edge_pairs
+        assert (b_id, b_run_id) in edge_pairs
+        # Cross-links must NOT exist
+        assert (a_id, b_run_id) not in edge_pairs
+        assert (b_id, a_run_id) not in edge_pairs
+
+    def test_conservative_call_resolution_self_method(self, tmp_path):
+        """P1 verification: self.method() must resolve strictly to the caller's class."""
+        code_file = tmp_path / "classes.py"
+        code_file.write_text(
+            "class A:\n"
+            "    def run(self):\n"
+            "        self.validate()\n"
+            "    def validate(self):\n"
+            "        pass\n"
+            "class B:\n"
+            "    def run(self):\n"
+            "        self.validate()\n"
+            "    def validate(self):\n"
+            "        pass\n",
+            encoding="utf-8",
+        )
+        mock_driver = MagicMock()
+        mock_session = MagicMock()
+        mock_driver.session.return_value.__enter__.return_value = mock_session
+
+        summary = ingest_codebase(str(tmp_path), mock_driver)
+        calls_arg = [
+            call[1]["calls"]
+            for call in mock_session.run.call_args_list
+            if "calls" in call[1]
+        ][0]
+        call_pairs = {(c["caller_id"], c["callee_id"]) for c in calls_arg}
+
+        a_run = make_symbol_id(str(tmp_path), "classes.py", "A.run")
+        a_val = make_symbol_id(str(tmp_path), "classes.py", "A.validate")
+        b_run = make_symbol_id(str(tmp_path), "classes.py", "B.run")
+        b_val = make_symbol_id(str(tmp_path), "classes.py", "B.validate")
+
+        assert (a_run, a_val) in call_pairs
+        assert (b_run, b_val) in call_pairs
+        # Must not cross-link to another class's method with the same name
+        assert (a_run, b_val) not in call_pairs
+        assert (b_run, a_val) not in call_pairs
+
+    def test_conservative_call_resolution_imported_module_vs_unresolved_object(self, tmp_path):
+        """P1 verification: module.func() resolves only when module is imported; obj.func() stays unresolved."""
+        (tmp_path / "utils.py").write_text("def helper(): pass\n", encoding="utf-8")
+        (tmp_path / "other.py").write_text("def helper(): pass\n", encoding="utf-8")
+        (tmp_path / "service.py").write_text(
+            "import utils\n"
+            "def run():\n"
+            "    utils.helper()\n"
+            "    db.helper()\n",
+            encoding="utf-8",
+        )
+        mock_driver = MagicMock()
+        mock_session = MagicMock()
+        mock_driver.session.return_value.__enter__.return_value = mock_session
+
+        summary = ingest_codebase(str(tmp_path), mock_driver)
+        calls_arg = [
+            call[1]["calls"]
+            for call in mock_session.run.call_args_list
+            if "calls" in call[1]
+        ][0]
+        call_pairs = {(c["caller_id"], c["callee_id"]) for c in calls_arg}
+
+        run_id = make_symbol_id(str(tmp_path), "service.py", "run")
+        utils_helper_id = make_symbol_id(str(tmp_path), "utils.py", "helper")
+        other_helper_id = make_symbol_id(str(tmp_path), "other.py", "helper")
+
+        # utils.helper() should resolve to utils.py::helper
+        assert (run_id, utils_helper_id) in call_pairs
+        # utils.helper() should NOT resolve to other.py::helper
+        assert (run_id, other_helper_id) not in call_pairs
+        # db.helper() must NOT create a speculative edge to either helper
+        assert len(call_pairs) == 1
+
+    def test_nested_function_and_class_qualnames_no_collision(self, tmp_path):
+        """P1 verification: nested functions and classes receive full qualnames with no ID collision."""
+        code_file = tmp_path / "nested.py"
+        code_file.write_text(
+            "def first():\n"
+            "    def helper():\n"
+            "        pass\n"
+            "def second():\n"
+            "    def helper():\n"
+            "        pass\n"
+            "class Outer:\n"
+            "    class Inner:\n"
+            "        def method(self):\n"
+            "            pass\n",
+            encoding="utf-8",
+        )
+        res = _parse_file(code_file)
+        qualnames = [s["qualname"] for s in res["symbols"]]
+        assert "first" in qualnames
+        assert "first.helper" in qualnames
+        assert "second" in qualnames
+        assert "second.helper" in qualnames
+        assert "Outer" in qualnames
+        assert "Outer.Inner" in qualnames
+        assert "Outer.Inner.method" in qualnames
+
+        mock_driver = MagicMock()
+        mock_session = MagicMock()
+        mock_driver.session.return_value.__enter__.return_value = mock_session
+
+        summary = ingest_codebase(str(tmp_path), mock_driver)
+        assert summary["symbols"] == 7
+
+        contains_calls = [
+            call[1]["contains"]
+            for call in mock_session.run.call_args_list
+            if "contains" in call[1]
+        ][0]
+        contains_pairs = {(c["parent_id"], c["child_id"]) for c in contains_calls}
+
+        first_id = make_symbol_id(str(tmp_path), "nested.py", "first")
+        first_helper_id = make_symbol_id(str(tmp_path), "nested.py", "first.helper")
+        second_id = make_symbol_id(str(tmp_path), "nested.py", "second")
+        second_helper_id = make_symbol_id(str(tmp_path), "nested.py", "second.helper")
+        outer_id = make_symbol_id(str(tmp_path), "nested.py", "Outer")
+        inner_id = make_symbol_id(str(tmp_path), "nested.py", "Outer.Inner")
+        method_id = make_symbol_id(str(tmp_path), "nested.py", "Outer.Inner.method")
+
+        assert (first_id, first_helper_id) in contains_pairs
+        assert (second_id, second_helper_id) in contains_pairs
+        assert (outer_id, inner_id) in contains_pairs
+        assert (inner_id, method_id) in contains_pairs
+
+    def test_package_imports_and_no_same_name_stem_collisions(self, tmp_path):
+        """P1 verification: package_a.utils and package_b.utils do not collide on stem 'utils'."""
+        pkg_a = tmp_path / "package_a"
+        pkg_b = tmp_path / "package_b"
+        pkg_a.mkdir()
+        pkg_b.mkdir()
+
+        (pkg_a / "utils.py").write_text("def helper_a(): pass\n", encoding="utf-8")
+        (pkg_b / "utils.py").write_text("def helper_b(): pass\n", encoding="utf-8")
+
+        (tmp_path / "service_a.py").write_text(
+            "from package_a.utils import helper_a\n"
+            "def run_a():\n"
+            "    helper_a()\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "service_b.py").write_text(
+            "from package_b.utils import helper_b\n"
+            "def run_b():\n"
+            "    helper_b()\n",
+            encoding="utf-8",
+        )
+
+        mock_driver = MagicMock()
+        mock_session = MagicMock()
+        mock_driver.session.return_value.__enter__.return_value = mock_session
+
+        summary = ingest_codebase(str(tmp_path), mock_driver)
+        calls_arg = [
+            call[1]["calls"]
+            for call in mock_session.run.call_args_list
+            if "calls" in call[1]
+        ][0]
+        call_pairs = {(c["caller_id"], c["callee_id"]) for c in calls_arg}
+
+        run_a_id = make_symbol_id(str(tmp_path), "service_a.py", "run_a")
+        helper_a_id = make_symbol_id(str(tmp_path), "package_a/utils.py", "helper_a")
+        run_b_id = make_symbol_id(str(tmp_path), "service_b.py", "run_b")
+        helper_b_id = make_symbol_id(str(tmp_path), "package_b/utils.py", "helper_b")
+
+        assert (run_a_id, helper_a_id) in call_pairs
+        assert (run_b_id, helper_b_id) in call_pairs
+        assert (run_a_id, helper_b_id) not in call_pairs
+        assert (run_b_id, helper_a_id) not in call_pairs
+
+    def test_multi_codebase_isolation_in_ingest_and_retrieval(self, tmp_path):
+        """P1 verification: codebase ingestion strictly scopes deletion and retrieval to root."""
+        mock_driver = MagicMock()
+        mock_session = MagicMock()
+        mock_driver.session.return_value.__enter__.return_value = mock_session
+
+        (tmp_path / "main.py").write_text("def main(): pass\n", encoding="utf-8")
+        ingest_codebase(str(tmp_path), mock_driver)
+
+        # Deletion query MUST scope exclusively to $root and not f.path IN $paths
+        executed_queries = [call[0][0] for call in mock_session.run.call_args_list]
+        delete_file_queries = [q for q in executed_queries if "MATCH (f:File" in q and "DETACH DELETE" in q]
+        assert len(delete_file_queries) == 1
+        assert "root: $root" in delete_file_queries[0]
+        assert "f.path IN $paths" not in delete_file_queries[0]
+
+        # Retrieval query MUST filter by $root
+        rag = GraphRAG(mock_driver, root=str(tmp_path))
+        rag.retrieve("main")
+        retrieval_query = mock_session.run.call_args[0][0]
+        assert "($root IS NULL OR node.root = $root)" in retrieval_query
+        assert mock_session.run.call_args[1]["root"] == tmp_path.resolve().as_posix()
+
+    def test_settings_and_graph_rag_parameter_validation(self):
+        """P2 verification: validation of retrieval settings and GraphRAG params."""
+        mock_driver = MagicMock()
+        with pytest.raises(ValueError, match="max_hops must be >= 1"):
+            GraphRAG(mock_driver, max_hops=0)
+        with pytest.raises(ValueError, match="min_score must be >= 0.0"):
+            GraphRAG(mock_driver, min_score=-0.1)
+
+
+
 

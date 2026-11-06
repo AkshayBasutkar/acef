@@ -101,10 +101,18 @@ curl -X POST http://localhost:8000/ingest/code \
   -d '{"root_path": "./data/demo_codebase"}'
 ```
 
-### 2. Ingest Document (MemRAG)
+### 2. Ingest Document(s) (MemRAG)
+- **Single document:**
 ```bash
 curl -X POST http://localhost:8000/ingest/document \
   -F "file=@data/demo_documents/pricing.md"
+```
+
+- **Multiple documents at once (Batch upload):**
+```bash
+curl -X POST http://localhost:8000/ingest/documents \
+  -F "files=@data/demo_documents/pricing.md" \
+  -F "files=@path/to/another_doc.pdf"
 ```
 
 ### 3. Execute Queries

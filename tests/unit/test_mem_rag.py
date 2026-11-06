@@ -88,6 +88,32 @@ class TestIngestDocument:
         assert kwargs["metadatas"][0]["source"] == "test_doc.md"
         assert kwargs["metadatas"][0]["type"] == "document"
 
+    def test_ingest_document_with_explicit_source_name(self, tmp_path):
+        """Change 1: Verify source_name overrides temporary file name for IDs and metadata."""
+        doc = tmp_path / "tmp_random_name_9872.tmp"
+        doc.write_text("CloudScale AI pricing tiers include Free, Pro, and Enterprise.", encoding="utf-8")
+
+        mock_col = MagicMock()
+        mock_embed = MagicMock()
+        mock_embed.encode.return_value = [0.1, 0.2, 0.3]
+
+        count = ingest_document(str(doc), mock_col, mock_embed, source_name="pricing.md")
+        assert count == 1
+
+        call_method = mock_col.upsert if hasattr(mock_col, "upsert") else mock_col.add
+        kwargs = call_method.call_args[1]
+        assert kwargs["ids"] == ["pricing.md_0"]
+        assert kwargs["metadatas"][0]["source"] == "pricing.md"
+
+    def test_ingest_empty_document_raises_value_error(self, tmp_path):
+        """Change 3: Verify zero-text document raises clear ValueError."""
+        doc = tmp_path / "empty.txt"
+        doc.write_text("   \n\t   ", encoding="utf-8")
+        col = MagicMock()
+        embed = MagicMock()
+        with pytest.raises(ValueError, match="No extractable text was found in this file"):
+            ingest_document(str(doc), col, embed)
+
 
 class TestIdempotentDocumentIngest:
     """I-12: Test that re-ingesting documents clears stale chunks."""
@@ -229,12 +255,49 @@ class TestMemRAG:
         chunks = rag.retrieve("What is the cost?", session_id="sess-1", top_k=2)
 
         assert len(chunks) == 2
-        # First chunk should be the closer match (distance 0.10 -> conversation turn)
-        assert chunks[0].source == "conversation turn (sess-1)"
-        assert chunks[0].text == "Earlier turn discussing discounts"
-        # Second chunk should be pricing.md
-        assert chunks[1].source == "pricing.md"
-        assert chunks[1].text == "Pricing is $49/mo"
+        # Documents come first and are preserved, followed by conversation turns
+        assert chunks[0].source == "pricing.md"
+        assert chunks[0].text == "Document evidence — pricing.md:\nPricing is $49/mo"
+        assert chunks[1].source == "conversation turn (sess-1)"
+        assert chunks[1].text == "Prior conversation — may be incomplete:\nEarlier turn discussing discounts"
+
+    def test_retrieve_preserves_separate_quotas_preventing_conversation_crowding(self, mock_components):
+        """Change 2: Separate quotas guarantee documents are never crowded out by closer conversation turns."""
+        mock_client, mock_col, mock_embed = mock_components
+        mock_col.count.return_value = 10
+
+        # 1 valid document with distance 0.25 (sim 0.75)
+        doc_return = {
+            "ids": [["doc_1"]],
+            "documents": [["Primary document fact"]],
+            "metadatas": [[{"source": "pricing.md", "type": "document"}]],
+            "distances": [[0.25]],
+        }
+        # 5 conversation turns with closer distance 0.10 (sim 0.90)
+        conv_return = {
+            "ids": [[f"turn_{i}" for i in range(5)]],
+            "documents": [[f"Turn content {i}" for i in range(5)]],
+            "metadatas": [[{"type": "conversation", "session_id": "sess-1"} for _ in range(5)]],
+            "distances": [[0.10] * 5],
+        }
+
+        def side_effect_query(*args, **kwargs):
+            where = kwargs.get("where", {})
+            if where.get("type") == "document":
+                return doc_return
+            return conv_return
+
+        mock_col.query.side_effect = side_effect_query
+
+        rag = MemRAG(mock_client, mock_embed)
+        chunks = rag.retrieve("Tell me about pricing", session_id="sess-1", doc_top_k=3, conv_top_k=2)
+
+        # Separate quotas guarantee document chunk is present (quota up to 3) + 2 conversation turns
+        assert len(chunks) == 3
+        assert chunks[0].source == "pricing.md"
+        assert "Document evidence — pricing.md:" in chunks[0].text
+        assert chunks[1].source == "conversation turn (sess-1)"
+        assert chunks[2].source == "conversation turn (sess-1)"
 
     def test_retrieve_failure_gracefully_degrades(self, mock_components):
         mock_client, mock_col, mock_embed = mock_components

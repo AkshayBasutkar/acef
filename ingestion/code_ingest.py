@@ -2,26 +2,19 @@
 Code Ingestion — parse a Python codebase and build a Neo4j graph.
 
 Walks a directory of .py files, parses each with the `ast` module, and
-writes nodes and edges to Neo4j:
+writes nodes and edges to Neo4j with complete root-isolation, canonical
+package-aware module resolution, and hierarchical lexical scoping:
 
-  - (:File {path, name})  nodes for each .py file
-  - (:Symbol {name, kind, docstring, file_path, lineno})  nodes for each
-    function, async function, or class definition
+  - (:File {id, path, name, root})  nodes for each .py file
+  - (:Symbol {id, name, qualname, kind, docstring, file_path, lineno, end_lineno, source, root})
   - (:File)-[:DEFINES]->(:Symbol)  edges linking files to their symbols
   - (:File)-[:IMPORTS]->(:File)  edges for intra-project imports
-  - (:Symbol)-[:CALLS]->(:Symbol)  edges for function calls (best-effort,
-    same-run resolution only)
-
-Python-only for this build (see §11 of the build guide).
-
-Usage:
-    from ingestion.code_ingest import ingest_codebase
-    summary = ingest_codebase("./data/demo_codebase", neo4j_driver)
+  - (:Symbol)-[:CONTAINS]->(:Symbol)  edges linking classes to methods/nested classes and functions to nested functions
+  - (:Symbol)-[:CALLS]->(:Symbol)  conservative, evidence-based function and method calls
 """
 
 import ast
 import logging
-import os
 from pathlib import Path
 
 from scripts.init_neo4j import init_neo4j
@@ -29,84 +22,230 @@ from scripts.init_neo4j import init_neo4j
 logger = logging.getLogger(__name__)
 
 
+def make_file_id(root: str, rel_path: str) -> str:
+    """Generate a globally unique, root-qualified identifier for a File node."""
+    norm_root = Path(root).resolve().as_posix()
+    norm_path = rel_path.replace("\\", "/")
+    return f"{norm_root}::{norm_path}"
+
+
+def make_symbol_id(root: str, rel_path: str, qualname: str) -> str:
+    """Generate a globally unique, root-qualified identifier for a Symbol node."""
+    norm_root = Path(root).resolve().as_posix()
+    norm_path = rel_path.replace("\\", "/")
+    return f"{norm_root}::{norm_path}::{qualname}"
+
+
 def _get_docstring(node: ast.AST) -> str:
-    """Extract the docstring from an AST node, or return empty string."""
+    """Extract docstring or return empty string."""
     try:
         return ast.get_docstring(node) or ""
     except TypeError:
         return ""
 
 
-def _collect_calls(node: ast.AST) -> list[str]:
+def _collect_calls(node: ast.AST) -> tuple[list[str], list[dict]]:
     """
-    Walk the body of a function/class and collect all direct call names.
-    Only captures simple Name calls (e.g. `foo()`) — not attribute calls
-    (e.g. `self.foo()` or `module.bar()`).
+    Extract calls with syntactic provenance:
+      - 'bare': foo()
+      - 'self': self.foo()
+      - 'attr': mod.foo() where value is Name
+      - 'other': obj.method()
     """
     calls = []
+    call_sites = []
     for child in ast.walk(node):
         if isinstance(child, ast.Call):
-            # Simple function call: foo()
             if isinstance(child.func, ast.Name):
                 calls.append(child.func.id)
-    return calls
+                call_sites.append({"type": "bare", "name": child.func.id})
+            elif isinstance(child.func, ast.Attribute):
+                calls.append(child.func.attr)
+                if isinstance(child.func.value, ast.Name):
+                    if child.func.value.id == "self":
+                        call_sites.append({"type": "self", "name": child.func.attr})
+                    else:
+                        call_sites.append({
+                            "type": "attr",
+                            "prefix": child.func.value.id,
+                            "name": child.func.attr,
+                        })
+                else:
+                    call_sites.append({"type": "other", "name": child.func.attr})
+    return calls, call_sites
 
 
-def _parse_file(file_path: Path, max_source_chars: int = 1200) -> dict:
+def _canonical_module_name(rel_path: str) -> str:
+    """Convert a relative file path (e.g. 'pkg/utils.py') to its canonical Python module name ('pkg.utils')."""
+    p = Path(rel_path)
+    parts = list(p.parts)
+    if parts and parts[-1].endswith(".py"):
+        parts[-1] = parts[-1][:-3]
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
+def _resolve_relative_import(current_file_rel: str, level: int, base_module: str | None) -> str | None:
+    """Resolve a relative import (level > 0) to a canonical dotted module name."""
+    p = Path(current_file_rel)
+    pkg_parts = list(p.parent.parts)
+    pop_count = level - 1
+    if pop_count > len(pkg_parts):
+        return None
+    if pop_count > 0:
+        pkg_parts = pkg_parts[:-pop_count]
+
+    result_parts = list(pkg_parts)
+    if base_module:
+        result_parts.extend(base_module.split("."))
+    return ".".join(result_parts) if result_parts else None
+
+
+class HierarchicalSymbolVisitor(ast.NodeVisitor):
     """
-    Parse a single Python file and extract symbols and their relationships.
-
-    Returns a dict with:
-      - "symbols": list of {name, kind, docstring, lineno, end_lineno, source, calls}
-      - "imports": list of module names imported via `import X` or `from X import ...`
+    AST Visitor that builds full lexical scopes (qualnames) for classes,
+    methods, and nested functions.
     """
+    def __init__(self, source: str, max_source_chars: int):
+        self.source = source
+        self.max_source_chars = max_source_chars
+        self.scope_stack: list[tuple[str, str]] = []  # (name, "class" | "function")
+        self.symbols: list[dict] = []
+
+    def _qualname(self) -> str:
+        return ".".join(name for name, _ in self.scope_stack)
+
+    def _parent_qualname(self) -> str | None:
+        if len(self.scope_stack) > 1:
+            return ".".join(name for name, _ in self.scope_stack[:-1])
+        return None
+
+    def _parent_class(self) -> str | None:
+        classes = [name for name, kind in self.scope_stack[:-1] if kind == "class"]
+        return ".".join(classes) if classes else None
+
+    def _process_node(self, node: ast.AST, is_class: bool):
+        qualname = self._qualname()
+        parent_qualname = self._parent_qualname()
+        parent_class = self._parent_class()
+
+        if is_class:
+            kind = "class"
+        elif len(self.scope_stack) > 1 and self.scope_stack[-2][1] == "class":
+            kind = "method"
+        elif len(self.scope_stack) > 1 and self.scope_stack[-2][1] == "function":
+            kind = "nested_function"
+        else:
+            kind = "function"
+
+        # Line-aware source truncation
+        source_segment = ""
+        try:
+            raw_segment = ast.get_source_segment(self.source, node)
+            if raw_segment:
+                if len(raw_segment) > self.max_source_chars:
+                    suffix = "\n# ... truncated"
+                    if self.max_source_chars > len(suffix):
+                        budget = self.max_source_chars - len(suffix)
+                        truncated = raw_segment[:budget]
+                        last_newline = truncated.rfind('\n')
+                        if last_newline > 0:
+                            source_segment = truncated[:last_newline] + suffix
+                        else:
+                            source_segment = truncated + suffix
+                    else:
+                        source_segment = raw_segment[:self.max_source_chars]
+                else:
+                    source_segment = raw_segment
+        except Exception:
+            pass
+
+        end_lineno = getattr(node, "end_lineno", node.lineno)
+        calls_list, call_sites_list = _collect_calls(node)
+
+        self.symbols.append({
+            "name": node.name,
+            "qualname": qualname,
+            "parent_qualname": parent_qualname,
+            "parent_class": parent_class,
+            "kind": kind,
+            "docstring": _get_docstring(node),
+            "lineno": node.lineno,
+            "end_lineno": end_lineno,
+            "source": source_segment,
+            "calls": calls_list,
+            "call_sites": call_sites_list,
+        })
+
+    def visit_ClassDef(self, node: ast.ClassDef):
+        self.scope_stack.append((node.name, "class"))
+        self._process_node(node, is_class=True)
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        self.scope_stack.append((node.name, "function"))
+        self._process_node(node, is_class=False)
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+        self.scope_stack.append((node.name, "function"))
+        self._process_node(node, is_class=False)
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+
+def _parse_file(file_path: Path, max_source_chars: int = 1200, rel_path: str = "") -> dict:
     source = file_path.read_text(encoding="utf-8", errors="replace")
 
     try:
         tree = ast.parse(source, filename=str(file_path))
     except SyntaxError as e:
         logger.warning("Skipping %s — syntax error: %s", file_path, e)
-        return {"symbols": [], "imports": []}
+        return {
+            "symbols": [],
+            "imports": [],
+            "imported_modules": {},
+            "imported_symbols": {},
+        }
 
-    symbols = []
+    visitor = HierarchicalSymbolVisitor(source, max_source_chars)
+    visitor.visit(tree)
+
     imports = []
+    imported_modules: dict[str, str] = {}
+    imported_symbols: dict[str, tuple[str, str]] = {}
+
+    rel_str = rel_path or file_path.name
 
     for node in ast.walk(tree):
-        # ── Symbols: functions, async functions, classes ─────────────
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            kind = "class" if isinstance(node, ast.ClassDef) else "function"
-
-            # I-03: Extract source code segment for LLM context
-            source_segment = ""
-            try:
-                raw_segment = ast.get_source_segment(source, node)
-                if raw_segment:
-                    source_segment = raw_segment[:max_source_chars]
-            except Exception as e:
-                logger.debug("Could not extract source segment for %s: %s", node.name, e)
-
-            end_lineno = getattr(node, "end_lineno", node.lineno)
-
-            symbol = {
-                "name": node.name,
-                "kind": kind,
-                "docstring": _get_docstring(node),
-                "lineno": node.lineno,
-                "end_lineno": end_lineno,
-                "source": source_segment,
-                "calls": _collect_calls(node),
-            }
-            symbols.append(symbol)
-
-        # ── Imports ──────────────────────────────────────────────────
-        elif isinstance(node, ast.Import):
+        if isinstance(node, ast.Import):
             for alias in node.names:
                 imports.append(alias.name)
+                local_name = alias.asname or alias.name
+                imported_modules[local_name] = alias.name
         elif isinstance(node, ast.ImportFrom):
-            if node.module:
-                imports.append(node.module)
+            level = getattr(node, "level", 0)
+            if level > 0:
+                resolved_mod = _resolve_relative_import(rel_str, level, node.module)
+            else:
+                resolved_mod = node.module
 
-    return {"symbols": symbols, "imports": imports}
+            if resolved_mod:
+                imports.append(resolved_mod)
+                for alias in node.names:
+                    local_name = alias.asname or alias.name
+                    imported_modules[local_name] = f"{resolved_mod}.{alias.name}"
+                    imported_symbols[local_name] = (resolved_mod, alias.name)
+
+    return {
+        "symbols": visitor.symbols,
+        "imports": imports,
+        "imported_modules": imported_modules,
+        "imported_symbols": imported_symbols,
+    }
 
 
 def ingest_codebase(root_path: str, neo4j_driver) -> dict:
@@ -123,14 +262,14 @@ def ingest_codebase(root_path: str, neo4j_driver) -> dict:
     Returns
     -------
     dict
-        Summary: {"files": N, "symbols": N, "calls": N, "imports": N}
+        Summary: {"files": N, "symbols": N, "calls": N, "imports": N, "contains": N}
     """
     root = Path(root_path).resolve()
-    root_str = str(root)
+    root_str = root.as_posix()
     if not root.is_dir():
         raise FileNotFoundError(f"Codebase path not found: {root}")
 
-    # Ensure indexes exist before ingesting
+    # Ensure indexes and constraints exist before ingesting
     init_neo4j(neo4j_driver)
 
     # ── Phase 1: Discover all files and filter Python vs non-Python ──────
@@ -174,47 +313,66 @@ def ingest_codebase(root_path: str, neo4j_driver) -> dict:
             "call_relationships": 0,
             "imports": 0,
             "import_relationships": 0,
+            "contains": 0,
+            "contains_relationships": 0,
             "skipped_non_python": len(non_py_files),
             "skipped_extensions": sorted(list(skipped_extensions)),
         }
 
-    # Map file stems to file paths (for resolving intra-project imports)
-    stem_to_path: dict[str, str] = {}
+    # Map canonical dotted module names to relative file paths
+    canonical_module_to_file: dict[str, str] = {}
+    file_to_canonical_module: dict[str, str] = {}
+    stem_to_file: dict[str, str | None] = {}
+
     for f in py_files:
-        rel_path = str(f.relative_to(root))
-        stem_to_path[f.stem] = rel_path
+        rel_path = str(f.relative_to(root)).replace("\\", "/")
+        can_name = _canonical_module_name(rel_path)
+        canonical_module_to_file[can_name] = rel_path
+        file_to_canonical_module[rel_path] = can_name
+
+        # Also support unique stem lookup if not colliding
+        stem = f.stem
+        if stem in stem_to_file:
+            stem_to_file[stem] = None  # ambiguous!
+        else:
+            stem_to_file[stem] = rel_path
 
     # Parse all files
     from config.settings import get_settings
     max_source_chars = get_settings().graph_source_max_chars
 
-    file_data: dict[str, dict] = {}  # rel_path -> parse result
+    file_data: dict[str, dict] = {}
     for f in py_files:
-        rel_path = str(f.relative_to(root))
-        file_data[rel_path] = _parse_file(f, max_source_chars=max_source_chars)
+        rel_path = str(f.relative_to(root)).replace("\\", "/")
+        file_data[rel_path] = _parse_file(f, max_source_chars=max_source_chars, rel_path=rel_path)
         logger.debug("Parsed %s — %d symbols", rel_path, len(file_data[rel_path]["symbols"]))
 
-    # Collect all symbol names for call resolution
-    all_symbol_names: set[str] = set()
-    for data in file_data.values():
-        for sym in data["symbols"]:
-            all_symbol_names.add(sym["name"])
+    # Assign deterministic IDs and build resolution indices
+    all_symbols_by_id: dict[str, dict] = {}
+    file_top_level_symbols: dict[str, set[str]] = {}
 
-    root_str = str(root)
+    for rel_path, data in file_data.items():
+        file_top_level_symbols[rel_path] = set()
+        for sym in data["symbols"]:
+            sym_id = make_symbol_id(root_str, rel_path, sym["qualname"])
+            sym["id"] = sym_id
+            sym["file_id"] = make_file_id(root_str, rel_path)
+            sym["file_path"] = rel_path
+            all_symbols_by_id[sym_id] = sym
+
+            if sym.get("parent_qualname") is None:
+                file_top_level_symbols[rel_path].add(sym["name"])
 
     # ── Phase 2: Write everything to Neo4j ───────────────────────────────
     with neo4j_driver.session() as session:
-        # I-12: Delete all File and Symbol nodes associated with this root before re-ingestion
-        all_paths = list(file_data.keys())
+        # Multi-codebase isolation: strictly delete nodes belonging to THIS root only
         session.run(
             """
-            MATCH (f:File)
-            WHERE f.root = $root OR f.path IN $paths
+            MATCH (f:File {root: $root})
             OPTIONAL MATCH (f)-[:DEFINES]->(s:Symbol)
             DETACH DELETE s, f
             """,
             root=root_str,
-            paths=all_paths,
         )
         session.run(
             """
@@ -223,18 +381,22 @@ def ingest_codebase(root_path: str, neo4j_driver) -> dict:
             """,
             root=root_str,
         )
-        logger.info("Cleared existing Neo4j data for root %s.", root_str)
+        logger.info("Cleared existing Neo4j data strictly for root %s.", root_str)
 
-        # Batch create File nodes via UNWIND
+        # Batch create File nodes via UNWIND with root-scoped id
         file_payload = [
-            {"path": rel_path, "name": Path(rel_path).name}
+            {
+                "id": make_file_id(root_str, rel_path),
+                "path": rel_path,
+                "name": Path(rel_path).name,
+            }
             for rel_path in file_data
         ]
         session.run(
             """
             UNWIND $files AS f_data
-            MERGE (f:File {path: f_data.path})
-            SET f.name = f_data.name, f.root = $root
+            MERGE (f:File {id: f_data.id})
+            SET f.path = f_data.path, f.name = f_data.name, f.root = $root
             """,
             files=file_payload,
             root=root_str,
@@ -245,9 +407,13 @@ def ingest_codebase(root_path: str, neo4j_driver) -> dict:
         for rel_path, data in file_data.items():
             for sym in data["symbols"]:
                 symbol_payload.append({
+                    "id": sym["id"],
+                    "file_id": sym["file_id"],
                     "file_path": rel_path,
                     "name": sym["name"],
+                    "qualname": sym["qualname"],
                     "kind": sym["kind"],
+                    "parent_class": sym.get("parent_class"),
                     "docstring": sym["docstring"],
                     "lineno": sym["lineno"],
                     "end_lineno": sym["end_lineno"],
@@ -258,10 +424,13 @@ def ingest_codebase(root_path: str, neo4j_driver) -> dict:
             session.run(
                 """
                 UNWIND $symbols AS sym
-                MATCH (f:File {path: sym.file_path, root: $root})
+                MATCH (f:File {id: sym.file_id})
                 CREATE (s:Symbol {
+                    id: sym.id,
                     name: sym.name,
+                    qualname: sym.qualname,
                     kind: sym.kind,
+                    parent_class: sym.parent_class,
                     docstring: sym.docstring,
                     file_path: sym.file_path,
                     lineno: sym.lineno,
@@ -275,53 +444,140 @@ def ingest_codebase(root_path: str, neo4j_driver) -> dict:
                 root=root_str,
             )
 
-        # Batch create IMPORTS edges via UNWIND
+        # Batch create IMPORTS edges via UNWIND (canonical module resolution)
         import_payload = []
+        seen_imports: set[tuple[str, str]] = set()
+
         for rel_path, data in file_data.items():
+            source_id = make_file_id(root_str, rel_path)
             for imported_module in data["imports"]:
-                module_base = imported_module.split(".")[-1]
-                if module_base in stem_to_path:
-                    target_path = stem_to_path[module_base]
-                    if target_path != rel_path:
+                target_rel = canonical_module_to_file.get(imported_module)
+                if not target_rel and imported_module in stem_to_file:
+                    target_rel = stem_to_file[imported_module]
+
+                if target_rel and target_rel != rel_path:
+                    target_id = make_file_id(root_str, target_rel)
+                    edge = (source_id, target_id)
+                    if edge not in seen_imports:
+                        seen_imports.add(edge)
                         import_payload.append({
-                            "source_path": rel_path,
-                            "target_path": target_path,
+                            "source_id": source_id,
+                            "target_id": target_id,
                         })
 
         if import_payload:
             session.run(
                 """
                 UNWIND $imports AS imp
-                MATCH (source:File {path: imp.source_path, root: $root})
-                MATCH (target:File {path: imp.target_path, root: $root})
+                MATCH (source:File {id: imp.source_id})
+                MATCH (target:File {id: imp.target_id})
                 MERGE (source)-[:IMPORTS]->(target)
                 """,
                 imports=import_payload,
-                root=root_str,
             )
 
-        # Batch create CALLS edges via UNWIND
+        # Conservative, evidence-based CALLS edge resolution
         call_payload = []
+        seen_calls: set[tuple[str, str]] = set()
+
         for rel_path, data in file_data.items():
+            imported_mods = data.get("imported_modules", {})
+            imported_syms = data.get("imported_symbols", {})
+
             for sym in data["symbols"]:
-                for called_name in sym["calls"]:
-                    if called_name in all_symbol_names and called_name != sym["name"]:
-                        call_payload.append({
-                            "caller_name": sym["name"],
-                            "file_path": rel_path,
-                            "callee_name": called_name,
-                        })
+                caller_id = sym["id"]
+                caller_parent_class = sym.get("parent_class")
+
+                for call in sym.get("call_sites", []):
+                    callee_id = None
+                    call_type = call.get("type")
+                    call_name = call.get("name")
+
+                    if call_type == "self":
+                        # self.method(): resolve strictly to caller_parent_class in this file
+                        if caller_parent_class:
+                            cand_qualname = f"{caller_parent_class}.{call_name}"
+                            cand_id = make_symbol_id(root_str, rel_path, cand_qualname)
+                            if cand_id in all_symbols_by_id:
+                                callee_id = cand_id
+
+                    elif call_type == "attr":
+                        # prefix.method(): ONLY resolve if prefix is a known imported module in this file
+                        prefix = call.get("prefix")
+                        if prefix in imported_mods:
+                            target_mod = imported_mods[prefix]
+                            target_rel = canonical_module_to_file.get(target_mod)
+                            if not target_rel and target_mod in stem_to_file:
+                                target_rel = stem_to_file[target_mod]
+
+                            if target_rel:
+                                cand_id = make_symbol_id(root_str, target_rel, call_name)
+                                if cand_id in all_symbols_by_id:
+                                    callee_id = cand_id
+
+                    elif call_type == "bare":
+                        # bare func():
+                        # Priority A: explicitly imported symbol
+                        if call_name in imported_syms:
+                            mod_name, orig_name = imported_syms[call_name]
+                            target_rel = canonical_module_to_file.get(mod_name)
+                            if not target_rel and mod_name in stem_to_file:
+                                target_rel = stem_to_file[mod_name]
+
+                            if target_rel:
+                                cand_id = make_symbol_id(root_str, target_rel, orig_name)
+                                if cand_id in all_symbols_by_id:
+                                    callee_id = cand_id
+
+                        # Priority B: top-level symbol in the same file
+                        if not callee_id and call_name in file_top_level_symbols.get(rel_path, set()):
+                            cand_id = make_symbol_id(root_str, rel_path, call_name)
+                            if cand_id != caller_id and cand_id in all_symbols_by_id:
+                                callee_id = cand_id
+
+                    # If resolved, record edge
+                    if callee_id and callee_id != caller_id:
+                        edge = (caller_id, callee_id)
+                        if edge not in seen_calls:
+                            seen_calls.add(edge)
+                            call_payload.append({
+                                "caller_id": caller_id,
+                                "callee_id": callee_id,
+                            })
 
         if call_payload:
             session.run(
                 """
                 UNWIND $calls AS call
-                MATCH (caller:Symbol {name: call.caller_name, file_path: call.file_path, root: $root})
-                MATCH (callee:Symbol {name: call.callee_name, root: $root})
+                MATCH (caller:Symbol {id: call.caller_id})
+                MATCH (callee:Symbol {id: call.callee_id})
                 MERGE (caller)-[:CALLS]->(callee)
                 """,
                 calls=call_payload,
-                root=root_str,
+            )
+
+        # Batch create CONTAINS edges (hierarchical lexical scoping)
+        contains_payload = []
+        for rel_path, data in file_data.items():
+            for sym in data["symbols"]:
+                parent_qualname = sym.get("parent_qualname")
+                if parent_qualname:
+                    parent_id = make_symbol_id(root_str, rel_path, parent_qualname)
+                    if parent_id in all_symbols_by_id:
+                        contains_payload.append({
+                            "parent_id": parent_id,
+                            "child_id": sym["id"],
+                        })
+
+        if contains_payload:
+            session.run(
+                """
+                UNWIND $contains AS c
+                MATCH (parent:Symbol {id: c.parent_id})
+                MATCH (child:Symbol {id: c.child_id})
+                MERGE (parent)-[:CONTAINS]->(child)
+                """,
+                contains=contains_payload,
             )
 
         counters = {
@@ -333,12 +589,15 @@ def ingest_codebase(root_path: str, neo4j_driver) -> dict:
             "call_relationships": len(call_payload),
             "imports": len(import_payload),
             "import_relationships": len(import_payload),
+            "contains": len(contains_payload),
+            "contains_relationships": len(contains_payload),
             "skipped_non_python": len(non_py_files),
             "skipped_extensions": sorted(list(skipped_extensions)),
         }
 
     logger.info(
-        "Ingestion complete — files=%d, symbols=%d, calls=%d, imports=%d, skipped_non_python=%d",
-        counters["files"], counters["symbols"], counters["calls"], counters["imports"], counters["skipped_non_python"],
+        "Ingestion complete — files=%d, symbols=%d, calls=%d, imports=%d, contains=%d, skipped_non_python=%d",
+        counters["files"], counters["symbols"], counters["calls"], counters["imports"],
+        counters["contains"], counters["skipped_non_python"],
     )
     return counters

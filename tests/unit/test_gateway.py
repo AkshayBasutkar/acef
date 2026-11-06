@@ -128,6 +128,21 @@ def test_ingest_document_success(mock_ingest_doc, client):
     assert data["status"] == "success"
     assert data["filename"] == "guide.md"
     assert data["chunks_stored"] == 4
+    assert mock_ingest_doc.call_args[1]["source_name"] == "guide.md"
+
+
+@patch("api.gateway.ingest_document")
+def test_ingest_document_zero_text_returns_400(mock_ingest_doc, client):
+    test_client, _, _ = client
+    mock_ingest_doc.side_effect = ValueError("No extractable text was found in this file. Image-only PDFs are not supported.")
+
+    file_content = b"   "
+    response = test_client.post(
+        "/ingest/document",
+        files={"file": ("empty.md", io.BytesIO(file_content), "text/markdown")},
+    )
+    assert response.status_code == 400
+    assert "No extractable text was found in this file. Image-only PDFs are not supported." in response.json()["detail"]
 
 
 def test_ingest_document_payload_too_large(client, monkeypatch):
@@ -154,6 +169,85 @@ def test_ingest_document_unsupported_format(client):
     )
     assert response.status_code == 400
     assert "Unsupported file type" in response.json()["detail"]
+
+
+@patch("api.gateway.ingest_document")
+def test_ingest_documents_endpoint_multi_success(mock_ingest_doc, client):
+    test_client, _, _ = client
+    mock_ingest_doc.return_value = 3
+
+    files = [
+        ("files", ("doc1.md", io.BytesIO(b"# First Document\nContent one"), "text/markdown")),
+        ("files", ("doc2.txt", io.BytesIO(b"Second document plain text"), "text/plain")),
+    ]
+    response = test_client.post("/ingest/documents", files=files)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["total_files"] == 2
+    assert data["successful"] == 2
+    assert data["failed"] == 0
+    assert data["total_chunks_stored"] == 6
+    assert len(data["results"]) == 2
+    assert data["results"][0]["filename"] == "doc1.md"
+    assert data["results"][1]["filename"] == "doc2.txt"
+
+
+@patch("api.gateway.ingest_document")
+def test_ingest_document_endpoint_multi_files(mock_ingest_doc, client):
+    test_client, _, _ = client
+    mock_ingest_doc.return_value = 2
+
+    files = [
+        ("file", ("file_a.md", io.BytesIO(b"# Doc A"), "text/markdown")),
+        ("file", ("file_b.txt", io.BytesIO(b"Doc B content"), "text/plain")),
+    ]
+    response = test_client.post("/ingest/document", files=files)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["total_files"] == 2
+    assert data["successful"] == 2
+    assert data["total_chunks_stored"] == 4
+
+
+@patch("api.gateway.ingest_document")
+def test_ingest_documents_partial_success(mock_ingest_doc, client):
+    test_client, _, _ = client
+    mock_ingest_doc.return_value = 5
+
+    files = [
+        ("files", ("valid.md", io.BytesIO(b"# Valid doc"), "text/markdown")),
+        ("files", ("invalid.exe", io.BytesIO(b"binary"), "application/octet-stream")),
+    ]
+    response = test_client.post("/ingest/documents", files=files)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "partial_success"
+    assert data["total_files"] == 2
+    assert data["successful"] == 1
+    assert data["failed"] == 1
+    assert data["total_chunks_stored"] == 5
+    assert data["results"][0]["status"] == "success"
+    assert data["results"][1]["status"] == "error"
+    assert "Unsupported file type" in data["results"][1]["error"]
+
+
+def test_ingest_documents_all_failed_returns_400(client):
+    test_client, _, _ = client
+    files = [
+        ("files", ("bad1.exe", io.BytesIO(b"bin1"), "application/octet-stream")),
+        ("files", ("bad2.bin", io.BytesIO(b"bin2"), "application/octet-stream")),
+    ]
+    response = test_client.post("/ingest/documents", files=files)
+    assert response.status_code == 400
+    assert "All 2 file(s) failed ingestion" in response.json()["detail"]
+
+
+def test_ingest_documents_empty_files_returns_400(client):
+    test_client, _, _ = client
+    response = test_client.post("/ingest/documents", files=[])
+    assert response.status_code == 400
 
 
 def test_health_check(client):
@@ -262,5 +356,76 @@ def test_health_check_responds_promptly_during_slow_query(client):
     assert query_resp.status_code == 200
     assert health_resp.status_code == 200
     assert t_health < 0.10
+
+
+def test_clear_graph_success(client):
+    """Test clearing graph via POST /graph/clear."""
+    test_client, _, _ = client
+    mock_driver = _services["neo4j_driver"]
+    mock_session = MagicMock()
+    mock_driver.session.return_value.__enter__.return_value = mock_session
+
+    mock_count_result = MagicMock()
+    mock_count_result.single.return_value = {"cnt": 42}
+    mock_session.run.side_effect = [mock_count_result, None]
+
+    response = test_client.post("/graph/clear")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["nodes_deleted"] == 42
+    assert "42 nodes deleted" in data["message"]
+
+
+def test_clear_graph_delete_method_success(client):
+    """Test clearing graph via DELETE /graph/clear."""
+    test_client, _, _ = client
+    mock_driver = _services["neo4j_driver"]
+    mock_session = MagicMock()
+    mock_driver.session.return_value.__enter__.return_value = mock_session
+
+    mock_count_result = MagicMock()
+    mock_count_result.single.return_value = {"cnt": 15}
+    mock_session.run.side_effect = [mock_count_result, None]
+
+    response = test_client.delete("/graph/clear")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["nodes_deleted"] == 15
+
+
+def test_clear_graph_no_driver_returns_503(client):
+    """Test 503 when Neo4j driver is unavailable."""
+    test_client, _, _ = client
+    saved_driver = _services.get("neo4j_driver")
+    try:
+        _services["neo4j_driver"] = None
+        with patch("api.gateway.init_services"):
+            response = test_client.post("/graph/clear")
+            assert response.status_code == 503
+            assert "Neo4j driver not connected" in response.json()["detail"]
+    finally:
+        _services["neo4j_driver"] = saved_driver
+
+
+def test_clear_cache_endpoint(client):
+    """Test clearing semantic cache via /cache/clear."""
+    test_client, mock_pipeline, _ = client
+    mock_pipeline.cache = MagicMock()
+    mock_pipeline.cache.clear.return_value = None
+
+    response = test_client.post("/cache/clear")
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    mock_pipeline.cache.clear.assert_called_once()
+
+    # Also test DELETE method
+    del_resp = test_client.delete("/cache/clear")
+    assert del_resp.status_code == 200
+    assert del_resp.json()["status"] == "success"
+
+
+
 
 

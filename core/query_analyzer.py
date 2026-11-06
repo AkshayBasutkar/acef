@@ -1,32 +1,13 @@
 """
-Query Analyzer — heuristic classifier with signal tiers.
+Query Analyzer — deterministic retrieval-needs classifier.
 
-No ML model or LLM call — deterministic, fast heuristics evaluated in priority order:
-  1. CODE — >= 1 strong CODE signal OR >= 2 distinct weak CODE signals
-  2. MEMORY — strong MEMORY phrase OR document probe >= threshold
-  3. FOLLOW-UP — query <= 5 words in long session (>= threshold turns):
-                 routes to CODE if last_turn_type == CODE, else MEMORY
-  4. SIMPLE — default / general knowledge
+The labels identify the evidence source required to answer, not the topic:
+  1. CODE — needs facts from the indexed local codebase / GraphRAG
+  2. MEMORY — needs an uploaded document or prior conversation / MemRAG
+  3. SIMPLE — answerable from the current query and general model knowledge
 
-Signal Tiers:
-  - Strong CODE:
-      * Traceback header ("traceback (most recent call last)")
-      * Source-file extension (.py, .js, .ts, .java, .cpp, .go, .rs, etc.)
-      * Backtick quotes (`foo`)
-      * Call syntax (name() / name(args))
-      * snake_case containing an underscore (foo_bar)
-      * Line-anchored statements (def f, class X, import x, from x import y)
-  - Weak CODE:
-      * function, method, variable, bug, error, exception, refactor, compile,
-        syntax, codebase, repo/repository, script, stack trace, type hint
-      * camelCase/PascalCase tokens not in brand allowlist
-      * relationship words (call, calls, called, caller, callee, defined, definition)
-      * known symbols from ingested codebase (length >= 4)
-  - Strong MEMORY phrases:
-      * you said, you mentioned, we discussed, we discuss, we talked, i told you,
-        my previous, last time, remind me what, as mentioned, the document,
-        the pdf, the file i uploaded, uploaded, according to the, in the document,
-        in the pdf, my notes
+Consequently, generic programming questions and self-contained pasted code are
+SIMPLE.  Technical vocabulary alone must never route a query to GraphRAG.
 """
 
 import logging
@@ -38,64 +19,28 @@ from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
-# ── Brand Allowlist (common brands with camelCase/PascalCase) ────────────────
-BRAND_ALLOWLIST: frozenset[str] = frozenset({
-    "iphone", "ipad", "ios", "macos", "youtube", "ebay", "powerpoint",
-    "javascript", "typescript", "github", "linkedin", "openai", "chatgpt",
-    "android", "google", "microsoft", "apple", "facebook", "meta", "twitter",
-    "netflix", "amazon", "aws", "docker", "redis", "postgres", "mysql", "mongodb",
-})
-
-# ── Strong CODE regex patterns ───────────────────────────────────────────────
-RE_TRACEBACK = re.compile(r"traceback\s+\(most\s+recent\s+call\s+last\)", re.IGNORECASE)
+# A concrete source filename can support a repository-specific request, but is
+# not sufficient alone (for example, a pasted traceback remains SIMPLE).
 RE_SOURCE_EXT = re.compile(
     r"\b[a-zA-Z0-9_\-\./\\]+\.(?:py|js|ts|jsx|tsx|java|cpp|c|h|cs|go|rs|rb|php|swift|kt)\b",
     re.IGNORECASE,
 )
-RE_BACKTICKS = re.compile(r"`[^`]+`")
-RE_CALL_SYNTAX_EMPTY = re.compile(r"\b[a-zA-Z_]\w*\s*\(\s*\)")
-RE_CALL_SYNTAX_ARGS = re.compile(
-    r"\b(?!(?:if|for|while|with|this|that|these|those|or|and|in|on|at|to|for|with|from|by|about|like|such|as|eg|ie|between|not|is|are|was|were|see|also|including)\b)"
-    r"[a-zA-Z_]\w*\s*\([a-zA-Z0-9_\s,\'\"*+-/]+\)",
-    re.IGNORECASE,
-)
-RE_SNAKE_CASE = re.compile(r"\b[a-z0-9]+_[a-z0-9_]+\b")
-RE_LINE_ANCHORED = re.compile(
-    r"(?m)^\s*(?:import\s+[a-zA-Z_]|from\s+[a-zA-Z_]\w*\s+import|def\s+[a-zA-Z_]|class\s+[a-zA-Z_])"
-)
-
-# ── Weak CODE regex patterns ─────────────────────────────────────────────────
-WEAK_CODE_PATTERNS: list[tuple[str, re.Pattern]] = [
-    ("function", re.compile(r"\bfunctions?\b", re.IGNORECASE)),
-    ("method", re.compile(r"\bmethods?\b", re.IGNORECASE)),
-    ("variable", re.compile(r"\bvariables?\b", re.IGNORECASE)),
-    ("bug", re.compile(r"\bbugs?\b", re.IGNORECASE)),
-    ("error", re.compile(r"\berrors?\b", re.IGNORECASE)),
-    ("exception", re.compile(r"\bexceptions?\b", re.IGNORECASE)),
-    ("refactor", re.compile(r"\brefactors?|refactoring|refactored\b", re.IGNORECASE)),
-    ("compile", re.compile(r"\bcompil(?:e|es|ed|ing|ation|er|ers)\b", re.IGNORECASE)),
-    ("syntax", re.compile(r"\bsyntax\b", re.IGNORECASE)),
-    ("codebase", re.compile(r"\bcodebases?\b", re.IGNORECASE)),
-    ("repo", re.compile(r"\brepos?(?:itor(?:y|ies))?\b", re.IGNORECASE)),
-    ("script", re.compile(r"\bscripts?\b", re.IGNORECASE)),
-    ("stack_trace", re.compile(r"\bstack\s+traces?\b", re.IGNORECASE)),
-    ("type_hint", re.compile(r"\btype\s+hints?\b", re.IGNORECASE)),
-    ("relationship", re.compile(r"\b(?:calls?|called|caller|callees?|defined|definitions?)\b", re.IGNORECASE)),
-]
-
-RE_CAMEL_CASE = re.compile(r"\b(?:[a-z]+[A-Z][a-zA-Z0-9]*|[A-Z][a-z0-9]+[A-Z][a-zA-Z0-9]*)\b")
 
 # ── Strong MEMORY phrases ────────────────────────────────────────────────────
 STRONG_MEMORY_PHRASES: list[str] = [
     "you said",
+    "what did you say",
     "you mentioned",
     "we discussed",
     "we discuss",
     "we talked",
+    "we agreed",
+    "we agree",
     "i told you",
     "my previous",
     "last time",
     "remind me what",
+    "do you remember",
     "as mentioned",
     "the document",
     "the pdf",
@@ -106,6 +51,32 @@ STRONG_MEMORY_PHRASES: list[str] = [
     "in the pdf",
     "my notes",
 ]
+
+# Explicit evidence-source and intent signals.  These are deliberately narrower
+# than generic programming vocabulary: they indicate that repository retrieval
+# can materially contribute to the answer.
+RE_LOCAL_CODEBASE_SCOPE = re.compile(
+    r"\b(?:this|the|our|my|current|local|indexed)\s+"
+    r"(?:codebase|code\s+base|repo(?:sitory)?|project|source\s+tree|source\s+code)\b",
+    re.IGNORECASE,
+)
+RE_REPOSITORY_NAVIGATION = re.compile(
+    r"\b(?:where\s+is\s+.+\s+defined|which\s+(?:functions?|methods?|files?)\s+"
+    r"(?:calls?|uses?|imports?|references?)|what\s+does\s+.+\s+(?:calls?|uses?|imports?)|"
+    r"what\s+(?:calls?|uses?|imports?)\s+.+|"
+    r"callers?\s+of|callees?\s+of|find\s+(?:the\s+)?(?:definition|implementation|"
+    r"references?)|trace\s+(?:the\s+)?call\s+(?:graph|path)|dependency\s+graph)\b",
+    re.IGNORECASE,
+)
+RE_GENERIC_PROGRAMMING_REQUEST = re.compile(
+    r"^\s*(?:how\s+(?:do|can|should)\s+i|how\s+to|what\s+is|explain|teach\s+me|"
+    r"show\s+me\s+how|write\s+(?:a|an|the)?|give\s+me\s+(?:a|an)?\s*example)",
+    re.IGNORECASE,
+)
+RE_FILE_FOCUSED_REQUEST = re.compile(
+    r"\b(?:inspect|explain|summarize|refactor|find|locate|what\s+does|why\s+does)\b",
+    re.IGNORECASE,
+)
 
 
 def classify(
@@ -140,47 +111,42 @@ def classify(
     ql = query.lower()
     settings = get_settings()
 
-    # ── 1. CODE Signals ──────────────────────────────────────────────────────
-    strong_code_signals: list[str] = []
-    if RE_TRACEBACK.search(query):
-        strong_code_signals.append("traceback")
-    if RE_SOURCE_EXT.search(query):
-        strong_code_signals.append("file_extension")
-    if RE_BACKTICKS.search(query):
-        strong_code_signals.append("backticks")
-    if RE_CALL_SYNTAX_EMPTY.search(query) or RE_CALL_SYNTAX_ARGS.search(query):
-        strong_code_signals.append("call_syntax")
-    if RE_SNAKE_CASE.search(query):
-        strong_code_signals.append("snake_case")
-    if RE_LINE_ANCHORED.search(query):
-        strong_code_signals.append("line_anchored")
+    tokens = set(re.findall(r"\b[a-zA-Z0-9_]{4,}\b", ql))
+    matched_symbols = tokens.intersection(known_symbols)
+    has_memory_reference = any(phrase in ql for phrase in STRONG_MEMORY_PHRASES)
+    has_local_scope = bool(RE_LOCAL_CODEBASE_SCOPE.search(query))
+    has_repo_navigation = bool(RE_REPOSITORY_NAVIGATION.search(query))
+    has_generic_programming_form = bool(RE_GENERIC_PROGRAMMING_REQUEST.search(query))
+    has_project_file_request = bool(
+        RE_SOURCE_EXT.search(query) and RE_FILE_FOCUSED_REQUEST.search(query)
+    )
 
-    distinct_weak_signals: set[str] = set()
-    for name, pattern in WEAK_CODE_PATTERNS:
-        if pattern.search(ql):
-            distinct_weak_signals.add(name)
+    # Explicit recall requests remain MEMORY even when the recalled subject is
+    # code.  A concrete repository action (find callers/definition, inspect this
+    # project, etc.) instead requires current GraphRAG evidence.
+    if has_memory_reference and not (has_local_scope or has_repo_navigation):
+        logger.debug("Classified as MEMORY — explicit stored-context reference")
+        return QueryType.MEMORY
 
-    # camelCase / PascalCase not in brand allowlist
-    for match in RE_CAMEL_CASE.findall(query):
-        if match.lower() not in BRAND_ALLOWLIST:
-            distinct_weak_signals.add(f"camel_case:{match.lower()}")
-
-    # Known codebase symbols matching query words
-    if known_symbols:
-        tokens = re.findall(r"\b[a-zA-Z0-9_]{4,}\b", ql)
-        for token in tokens:
-            if token in known_symbols:
-                distinct_weak_signals.add(f"known_symbol:{token}")
-
-    if len(strong_code_signals) >= 1 or len(distinct_weak_signals) >= 2:
+    # CODE requires local-corpus evidence. A known symbol is useful evidence,
+    # except in an explicitly generic tutorial/how-to formulation.
+    code_required = (
+        has_local_scope
+        or has_repo_navigation
+        or has_project_file_request
+        or (bool(matched_symbols) and not has_generic_programming_form)
+    )
+    if code_required:
         logger.debug(
-            "Classified as CODE — strong signals: %s, distinct weak signals: %s",
-            strong_code_signals,
-            list(distinct_weak_signals),
+            "Classified as CODE — local_scope=%s repo_navigation=%s file_request=%s symbols=%s",
+            has_local_scope,
+            has_repo_navigation,
+            has_project_file_request,
+            sorted(matched_symbols),
         )
         return QueryType.CODE
 
-    # ── 2. MEMORY Signals ────────────────────────────────────────────────────
+    # ── MEMORY Signals ────────────────────────────────────────────────────────
     matched_memory_phrase = any(phrase in ql for phrase in STRONG_MEMORY_PHRASES)
     if matched_memory_phrase:
         logger.debug("Classified as MEMORY — matched strong memory phrase")

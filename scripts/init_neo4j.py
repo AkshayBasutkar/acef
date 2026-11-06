@@ -25,11 +25,16 @@ INIT_STATEMENTS = [
     CREATE FULLTEXT INDEX symbolSearch IF NOT EXISTS
     FOR (s:Symbol) ON EACH [s.name, s.docstring]
     """,
-    # Uniqueness constraint on File.path — prevents duplicate File nodes
-    # if the same codebase is ingested more than once.
+    # Uniqueness constraint on File.id (root-qualified path) — prevents collisions
+    # across multiple ingested codebases.
     """
-    CREATE CONSTRAINT file_path_unique IF NOT EXISTS
-    FOR (f:File) REQUIRE f.path IS UNIQUE
+    CREATE CONSTRAINT file_id_unique IF NOT EXISTS
+    FOR (f:File) REQUIRE f.id IS UNIQUE
+    """,
+    # Uniqueness constraint on Symbol.id (globally qualified symbol identifier)
+    """
+    CREATE CONSTRAINT symbol_id_unique IF NOT EXISTS
+    FOR (s:Symbol) REQUIRE s.id IS UNIQUE
     """,
 ]
 
@@ -69,4 +74,4 @@ def init_neo4j(driver=None) -> None:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     init_neo4j()
-    print("✓ Neo4j indexes and constraints created successfully.")
+    print("[OK] Neo4j indexes and constraints created successfully.")

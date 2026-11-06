@@ -20,6 +20,65 @@ from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
+# Compact stop-words set for lowercase content-term extraction
+STOP_WORDS: set[str] = {
+    # Pronouns, determiners, conjunctions
+    "what", "which", "where", "when", "who", "whom", "whose", "why", "how",
+    "that", "this", "these", "those",
+    "a", "an", "the", "and", "or", "but", "nor", "for", "yet", "so",
+    "both", "either", "neither", "each", "every", "all", "any", "some",
+    "few", "more", "most", "other", "such", "than", "too", "very",
+    # Prepositions
+    "about", "above", "across", "after", "against", "along", "among", "around",
+    "at", "before", "behind", "below", "beneath", "beside", "between", "beyond",
+    "by", "down", "during", "except", "from", "in", "inside", "into", "near",
+    "off", "on", "onto", "out", "outside", "over", "through", "throughout",
+    "till", "to", "toward", "under", "until", "up", "upon", "with", "within", "without",
+    # Verbs / auxiliaries
+    "is", "am", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "having", "do", "does", "did", "doing",
+    "can", "could", "shall", "should", "will", "would", "may", "might", "must",
+    # Common conversational / query framing verbs & fillers
+    "tell", "show", "give", "explain", "describe", "find", "list", "name",
+    "please", "help", "know", "mean", "want", "like", "just", "also", "city",
+}
+
+
+def extract_content_terms(text: str) -> set[str]:
+    """
+    Extract meaningful lowercase content terms (nouns, lowercase entities,
+    identifiers, code terms) excluding common English stop words.
+
+    Captures:
+      - Identifier-like tokens with '.' or '_' (e.g. 'auth.py', 'user_id', 'hash_password')
+      - General content words of length >= 4 not in STOP_WORDS (e.g. 'france', 'germany', 'developer', 'enterprise')
+    """
+    raw_words = re.findall(r"[a-zA-Z_][a-zA-Z0-9_.-]*", text.lower())
+    content_terms = set()
+    for w in raw_words:
+        cleaned = w.strip(".-")
+        if not cleaned:
+            continue
+        if ("." in cleaned or "_" in cleaned) and cleaned not in STOP_WORDS:
+            content_terms.add(cleaned)
+        elif len(cleaned) >= 4 and cleaned not in STOP_WORDS:
+            content_terms.add(cleaned)
+    return content_terms
+
+
+def cache_terms_compatible(current_query: str, cached_query: str) -> bool:
+    """
+    Verify that the meaningful content terms between the current query and cached query match.
+
+    Prevents false cache hits when embedding similarity is high but key lowercase
+    entities or identifiers differ (e.g. 'france' vs 'germany', 'auth.py' vs 'main.py').
+    """
+    current_terms = extract_content_terms(current_query)
+    cached_terms = extract_content_terms(cached_query)
+    if current_terms or cached_terms:
+        return current_terms == cached_terms
+    return True
+
 
 def extract_salient_tokens(text: str) -> set[str]:
     """
@@ -149,6 +208,7 @@ class RAGCacheLite:
             metas = results.get("metadatas", [[]])
             cached_query = metas[0][0].get("query", "") if (metas and metas[0] and isinstance(metas[0][0], dict)) else ""
             if cached_query:
+                # 1. Salient-token guard (digits/numbers, quoted strings, capitalized words)
                 tokens_curr = extract_salient_tokens(query)
                 tokens_cached = extract_salient_tokens(cached_query)
                 if tokens_curr != tokens_cached:
@@ -158,6 +218,17 @@ class RAGCacheLite:
                         self._threshold,
                         tokens_curr,
                         tokens_cached,
+                    )
+                    return None
+
+                # 2. Content-term guard (lowercase entities, code identifiers, important terms)
+                if not cache_terms_compatible(query, cached_query):
+                    logger.info(
+                        "Cache miss (content guard) — similarity=%.4f >= %.3f, but content terms mismatch: %s vs %s",
+                        similarity,
+                        self._threshold,
+                        extract_content_terms(query),
+                        extract_content_terms(cached_query),
                     )
                     return None
 
@@ -185,7 +256,8 @@ class RAGCacheLite:
         as the Chroma document (returned on cache hits).  The original query
         text is kept in metadata for debugging/inspection.
         """
-        query_embedding = self._embed.encode(query).tolist()
+        raw_emb = self._embed.encode(query)
+        query_embedding = raw_emb.tolist() if hasattr(raw_emb, "tolist") else list(raw_emb)
 
         with self._lock:
             self._collection.add(

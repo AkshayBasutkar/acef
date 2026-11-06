@@ -5,7 +5,7 @@ Acceptance criteria verified:
   1. With demo corpus ingested, demo queries route as documented:
      - "What does login call?" -> CODE
      - "What are the pricing tiers?" -> MEMORY
-  2. With empty corpus, the same queries route to SIMPLE.
+  2. Routing reflects required evidence even when a corpus is unavailable.
   3. Neo4j or Chroma failure never raises from classify — signals degrade to "none".
   4. The query embedding is computed exactly once per request.
 """
@@ -119,7 +119,7 @@ class TestCorpusAwareRouting:
 
     def test_demo_queries_with_corpus_route_as_documented(self):
         # Demo query 1: "What does login call?"
-        # login is in known symbols -> 1 weak signal; 'call' is relationship word -> 1 weak signal -> 2 weak -> CODE
+        # A known local symbol reinforces that call-graph retrieval is required.
         q1 = "What does login call?"
         res1 = classify(q1, known_symbols=frozenset({"login", "hash_password"}))
         assert res1 == QueryType.CODE
@@ -130,11 +130,12 @@ class TestCorpusAwareRouting:
         res2 = classify(q2, doc_similarity_fn=lambda: 0.85)
         assert res2 == QueryType.MEMORY
 
-    def test_demo_queries_with_empty_corpus_route_simple(self):
-        # With empty corpus, "What does login call?" only has 'call' (1 weak signal < 2) -> SIMPLE
+    def test_empty_corpus_does_not_change_required_evidence_source(self):
+        # This remains a call-graph question. GraphRAG may return no context,
+        # but general model knowledge cannot supply the repository-specific fact.
         q1 = "What does login call?"
         res1 = classify(q1, known_symbols=frozenset(), doc_similarity_fn=lambda: 0.0)
-        assert res1 == QueryType.SIMPLE
+        assert res1 == QueryType.CODE
 
         # "What are the pricing tiers?" has no keywords and 0 similarity -> SIMPLE
         q2 = "What are the pricing tiers?"

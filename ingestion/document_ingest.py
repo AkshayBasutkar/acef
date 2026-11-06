@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf"}
 
 
-def _extract_text(file_path: Path) -> str:
+def _extract_text(file_path: Path, source_name: Optional[str] = None) -> str:
     """
     Extract text from a file based on its extension.
 
@@ -30,6 +30,8 @@ def _extract_text(file_path: Path) -> str:
     ----------
     file_path : Path
         Path to the target document.
+    source_name : str, optional
+        Original source name used for fallback extension detection if file_path has a temporary extension.
 
     Returns
     -------
@@ -37,6 +39,8 @@ def _extract_text(file_path: Path) -> str:
         Extracted raw text content.
     """
     ext = file_path.suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS and source_name:
+        ext = Path(source_name).suffix.lower()
 
     if ext in {".txt", ".md"}:
         return file_path.read_text(encoding="utf-8", errors="replace")
@@ -101,6 +105,8 @@ def ingest_document(
     embedding_model,
     chunk_size: int = 300,
     chunk_overlap: int = 50,
+    *,
+    source_name: Optional[str] = None,
 ) -> int:
     """
     Chunk and embed a document into Chroma's "memory" collection.
@@ -117,23 +123,32 @@ def ingest_document(
         Words per chunk (default 300).
     chunk_overlap : int
         Overlapping words per chunk (default 50).
+    source_name : str, optional
+        Original filename or stable document identity (default: file_path's filename).
 
     Returns
     -------
     int
         Number of chunks stored.
+
+    Raises
+    ------
+    FileNotFoundError
+        If file_path does not exist.
+    ValueError
+        If the file yields no extractable text chunks (e.g. empty or image-only PDF).
     """
     path = Path(file_path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"Document file not found: {path}")
 
-    filename = path.name
-    raw_text = _extract_text(path)
+    doc_name = source_name or path.name
+    raw_text = _extract_text(path, source_name=doc_name)
     chunks = _chunk_text(raw_text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
     if not chunks:
-        logger.warning("Document %s produced no text chunks.", filename)
-        return 0
+        logger.warning("Document %s produced no text chunks.", doc_name)
+        raise ValueError("No extractable text was found in this file. Image-only PDFs are not supported.")
 
     ids = []
     embeddings = []
@@ -141,7 +156,7 @@ def ingest_document(
     documents = []
 
     for i, chunk in enumerate(chunks):
-        chunk_id = f"{filename}_{i}"
+        chunk_id = f"{doc_name}_{i}"
         raw_emb = embedding_model.encode(chunk)
         emb_list = raw_emb.tolist() if hasattr(raw_emb, "tolist") else list(raw_emb)
 
@@ -150,19 +165,19 @@ def ingest_document(
         documents.append(chunk)
         metadatas.append({
             "type": "document",
-            "source": filename,
+            "source": doc_name,
             "chunk_index": i,
         })
 
-    # I-12: Delete any existing chunks for this document before storing new ones.
-    # Guarantees idempotence: if a document got shorter, stale chunks are removed.
+    # Delete any existing chunks for this document before storing new ones.
+    # Guarantees idempotence: if a document got shorter or is re-uploaded, stale chunks are removed.
     try:
         if hasattr(chroma_collection, "get") and hasattr(chroma_collection, "delete"):
             existing = chroma_collection.get(
                 where={
                     "$and": [
                         {"type": "document"},
-                        {"source": filename},
+                        {"source": doc_name},
                     ]
                 }
             )
@@ -171,10 +186,10 @@ def ingest_document(
                 logger.info(
                     "Deleted %d existing chunks for document %s before re-ingestion.",
                     len(existing["ids"]),
-                    filename,
+                    doc_name,
                 )
     except Exception as e:
-        logger.debug("Could not clear previous chunks for %s: %s", filename, e)
+        logger.debug("Could not clear previous chunks for %s: %s", doc_name, e)
 
     # Use upsert if available to support re-ingesting documents cleanly
     if hasattr(chroma_collection, "upsert"):
@@ -192,5 +207,5 @@ def ingest_document(
             metadatas=metadatas,
         )
 
-    logger.info("Ingested document %s: stored %d chunks.", filename, len(chunks))
+    logger.info("Ingested document %s: stored %d chunks.", doc_name, len(chunks))
     return len(chunks)

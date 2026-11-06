@@ -1,14 +1,18 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ACEF — Adaptive Context Engineering Framework</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@500;600;700;800&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css?v=2.5">
 </head>
+
 <body>
   <!-- Ambient background glow elements -->
   <div class="glow-orb orb-1"></div>
@@ -27,7 +31,7 @@
         <div class="brand-text">
           <div class="brand-title">
             <span class="gradient-text">ACEF</span>
-            <span class="version-tag">Lean Build</span>
+            <span class="version-tag">v2.0 · Modular Architecture</span>
           </div>
           <div class="brand-subtitle">Adaptive Context Engineering Framework</div>
         </div>
@@ -35,13 +39,15 @@
 
       <!-- Main Navigation Mode Switcher -->
       <div class="view-mode-switcher">
-        <button class="view-mode-btn active" id="btn-mode-chat" data-view="chat" title="Interactive Chat & Context Inspector">
+        <button class="view-mode-btn active" id="btn-mode-chat" data-view="chat" onclick="switchView('chat')"
+          title="Interactive Chat & Context Inspector">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
           </svg>
           Chat Studio
         </button>
-        <button class="view-mode-btn" id="btn-mode-graph" data-view="graph" title="Interactive Code Knowledge Graph Visualizer">
+        <button class="view-mode-btn" id="btn-mode-graph" data-view="graph" onclick="switchView('graph')"
+          title="Interactive Code Knowledge Graph Visualizer">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
             <circle cx="6" cy="6" r="3"></circle>
             <circle cx="18" cy="6" r="3"></circle>
@@ -56,20 +62,25 @@
 
       <!-- Live Health & Telemetry Status Pills -->
       <div class="header-telemetry">
-        <div class="telemetry-pill" id="pill-neo4j" title="Graph Database (Neo4j)">
+        <div class="telemetry-pill" id="pill-neo4j" title="Graph Database (Neo4j GraphRAG)">
           <span class="dot"></span>
           <span class="label">Neo4j</span>
           <span class="val">Connecting...</span>
         </div>
-        <div class="telemetry-pill" id="pill-chroma" title="Vector Database (ChromaDB)">
+        <div class="telemetry-pill" id="pill-chroma" title="Vector Database (ChromaDB MemRAG & Cache)">
           <span class="dot"></span>
           <span class="label">Chroma</span>
           <span class="val">Connecting...</span>
         </div>
-        <div class="telemetry-pill" id="pill-llm" title="Active Generator">
+        <div class="telemetry-pill" id="pill-llm" title="Active Generator Engine">
           <span class="dot"></span>
           <span class="label">LLM</span>
           <span class="val">Connecting...</span>
+        </div>
+        <div class="telemetry-pill" id="pill-classifier" title="Active Query Classifier Backend">
+          <span class="dot"></span>
+          <span class="label">Router</span>
+          <span class="val">Heuristic</span>
         </div>
         <button class="icon-btn" id="btn-refresh-health" title="Refresh Service Health">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -116,21 +127,30 @@
               </div>
               <div class="card-title-group">
                 <h3>Code Ingestion (GraphRAG)</h3>
-                <p>Parse AST symbols into Neo4j graph</p>
+                <p>AST symbols, qualified names & call graph into Neo4j</p>
               </div>
             </div>
             <div class="card-body">
               <div class="input-group">
-                <label for="input-code-path">Codebase Root Directory (Any path supported)</label>
+                <label for="input-code-path">Codebase Directory (Root-isolated AST indexing)</label>
                 <div class="input-with-button">
-                  <input type="text" id="input-code-path" value="./data/demo_codebase" placeholder="e.g. C:\path\to\codebase or ./data/demo_codebase">
+                  <input type="text" id="input-code-path" value="./data/demo_codebase"
+                    placeholder="e.g. ./data/demo_codebase or absolute path">
                   <button class="btn btn-primary" id="btn-ingest-code">Ingest</button>
                 </div>
               </div>
               <div class="ingest-status" id="code-ingest-status"></div>
-              <button class="btn btn-secondary btn-xs" id="btn-quick-view-graph" style="margin-top: 8px; width: 100%;">
-                🕸️ Open In-App Graph Visualizer
-              </button>
+              <div class="sidebar-graph-actions" style="display: flex; gap: 8px; margin-top: 8px;">
+                <button class="btn btn-secondary btn-xs" id="btn-quick-view-graph" onclick="switchView('graph')"
+                  style="flex: 1;" title="Open in-app interactive graph visualizer">
+                  🕸️ Open Graph
+                </button>
+                <button class="btn btn-danger btn-xs" id="btn-clear-graph-sidebar"
+                  onclick="graphVisualizer.clearGraph()" style="flex: 1;"
+                  title="Delete all nodes and relationships from Neo4j">
+                  🗑️ Clear Graph
+                </button>
+              </div>
             </div>
           </div>
 
@@ -148,35 +168,44 @@
               </div>
               <div class="card-title-group">
                 <h3>Document Ingestion (MemRAG)</h3>
-                <p>Chunk & embed into Chroma vector store</p>
+                <p>Dual-partition chunking & embeddings in ChromaDB</p>
               </div>
             </div>
             <div class="card-body">
               <div class="drop-zone" id="drop-zone">
-                <input type="file" id="file-input" accept=".md,.txt,.pdf" style="display: none;">
+                <input type="file" id="file-input" accept=".md,.txt,.pdf" multiple style="display: none;">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="upload-icon">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                   <polyline points="17 8 12 3 7 8" />
                   <line x1="12" y1="3" x2="12" y2="15" />
                 </svg>
-                <p class="drop-text">Click or drag <strong>.md, .txt, .pdf</strong></p>
+                <p class="drop-text">Click or drag <strong>.md, .txt, .pdf</strong> (single or batch upload)</p>
               </div>
               <div class="quick-ingest-row">
-                <span>Or use preset:</span>
-                <button class="btn btn-secondary btn-xs" id="btn-ingest-demo-doc">Ingest pricing.md</button>
+                <span>Preset:</span>
+                <button class="btn btn-secondary btn-xs" id="btn-ingest-demo-doc"
+                  title="Ingest CloudScale AI pricing.md into ChromaDB">Ingest CloudScale pricing.md</button>
               </div>
               <div class="ingest-status" id="doc-ingest-status"></div>
             </div>
           </div>
 
-          <!-- Semantic Cache Clear -->
+          <!-- Dual-Guard Semantic Cache Card -->
           <div class="studio-card compact">
             <div class="cache-row">
               <div class="cache-info">
-                <span class="cache-badge">RAGCache-Lite</span>
-                <span class="cache-desc">Cosine Similarity Semantic Cache</span>
+                <div class="cache-badge-group">
+                  <span class="cache-badge">RAGCacheLite</span>
+                  <span class="cache-guard-badge">Dual-Guard Active</span>
+                </div>
+                <span class="cache-desc">Salient & Content-Term Guards (sim ≥ 0.92)</span>
               </div>
-              <button class="btn btn-danger btn-xs" id="btn-clear-cache" title="Clear all cached responses">Clear Cache</button>
+              <button class="btn btn-danger btn-xs" id="btn-clear-cache" title="Purge all semantic cache entries">Clear
+                Cache</button>
+            </div>
+            <div class="cache-helper-text">
+              Guards against false hits on entity & identifier swaps (e.g. France vs Germany). Stores SIMPLE queries
+              only.
             </div>
           </div>
         </div>
@@ -186,32 +215,34 @@
           <div class="pipeline-visualizer">
             <div class="visualizer-header">
               <h4>5-Step Execution Lifecycle</h4>
-              <p>Active route lights up in real-time</p>
+              <p>Active route lights up with real-time telemetry</p>
             </div>
 
+            <!-- Step 1: Cache Check -->
             <div class="flow-step" id="step-cache">
               <div class="step-num">1</div>
               <div class="step-content">
                 <div class="step-name">Semantic Cache Check</div>
-                <div class="step-detail">RAGCache-Lite (threshold = 0.92)</div>
+                <div class="step-detail">RAGCacheLite Dual-Guard (sim ≥ 0.92)</div>
               </div>
               <div class="step-badge" id="badge-cache-result">—</div>
             </div>
 
             <div class="flow-connector"></div>
 
+            <!-- Step 2: Classifier -->
             <div class="flow-step" id="step-classify">
               <div class="step-num">2</div>
               <div class="step-content">
                 <div class="step-name">Query Analyzer</div>
-                <div class="step-detail">Signal Tiers + CorpusIndex</div>
+                <div class="step-detail">Two-Tier Signals + CorpusIndex + Probe</div>
               </div>
               <div class="step-badge" id="badge-classify-result">—</div>
             </div>
 
             <div class="flow-connector"></div>
 
-            <!-- Branch Split Container -->
+            <!-- Branch Split Container (Step 3) -->
             <div class="branch-container">
               <div class="branch-card" id="branch-simple">
                 <div class="branch-header">SIMPLE</div>
@@ -219,32 +250,34 @@
               </div>
               <div class="branch-card" id="branch-code">
                 <div class="branch-header">CODE</div>
-                <div class="branch-detail">GraphRAG on Neo4j (1-hop)</div>
+                <div class="branch-detail">GraphRAG on Neo4j (Multi-Hop AST)</div>
               </div>
               <div class="branch-card" id="branch-memory">
                 <div class="branch-header">MEMORY</div>
-                <div class="branch-detail">MemRAG on ChromaDB</div>
+                <div class="branch-detail">MemRAG on Chroma (Quota-Preserved)</div>
               </div>
             </div>
 
             <div class="flow-connector"></div>
 
+            <!-- Step 4: LLM Generation -->
             <div class="flow-step" id="step-llm">
               <div class="step-num">4</div>
               <div class="step-content">
                 <div class="step-name">LLM Generation</div>
-                <div class="step-detail">Context-budgeted prompt generation</div>
+                <div class="step-detail">Context-budgeted prompt (≤ 6000 chars)</div>
               </div>
               <div class="step-badge" id="badge-llm-result">—</div>
             </div>
 
             <div class="flow-connector"></div>
 
+            <!-- Step 5: Write-Back -->
             <div class="flow-step" id="step-writeback">
               <div class="step-num">5</div>
               <div class="step-content">
-                <div class="step-name">Memory & Cache Write-Back</div>
-                <div class="step-detail">Append turn + Cache if SIMPLE</div>
+                <div class="step-name">Write-Back & State Persistence</div>
+                <div class="step-detail">All turns to Session Memory; SIMPLE cached</div>
               </div>
               <div class="step-badge" id="badge-writeback-result">—</div>
             </div>
@@ -259,13 +292,21 @@
               <div class="prompt-text">"What is the capital of France?"</div>
               <div class="prompt-tags">
                 <span class="tag tag-simple">SIMPLE</span>
-                <span class="tag tag-cache">Hit/Miss Test</span>
+                <span class="tag tag-cache">Cache Hit/Miss Test</span>
               </div>
             </button>
             <button class="prompt-card" data-query="Explain how binary search works in simple terms.">
               <div class="prompt-text">"Explain how binary search works in simple terms."</div>
               <div class="prompt-tags">
                 <span class="tag tag-simple">SIMPLE</span>
+                <span class="tag tag-cache">Direct Reasoning</span>
+              </div>
+            </button>
+            <button class="prompt-card" data-query="What is the capital of Germany?">
+              <div class="prompt-text">"What is the capital of Germany?"</div>
+              <div class="prompt-tags">
+                <span class="tag tag-simple">SIMPLE</span>
+                <span class="tag tag-cache">Content Guard Test</span>
               </div>
             </button>
 
@@ -274,30 +315,60 @@
               <div class="prompt-text">"What does the login function call?"</div>
               <div class="prompt-tags">
                 <span class="tag tag-code">CODE</span>
-                <span class="tag tag-graph">Neo4j 1-Hop</span>
+                <span class="tag tag-graph">AST Call Graph</span>
               </div>
             </button>
             <button class="prompt-card" data-query="Why might login fail?">
               <div class="prompt-text">"Why might login fail?"</div>
               <div class="prompt-tags">
                 <span class="tag tag-code">CODE</span>
-                <span class="tag tag-code">Source Inspection</span>
+                <span class="tag tag-graph">Source Code Inspection</span>
+              </div>
+            </button>
+            <button class="prompt-card" data-query="What does create_user in auth.py do?">
+              <div class="prompt-text">"What does create_user in auth.py do?"</div>
+              <div class="prompt-tags">
+                <span class="tag tag-code">CODE</span>
+                <span class="tag tag-graph">AST Function Body</span>
               </div>
             </button>
 
-            <div class="prompt-category">🧠 MemRAG Document & Session Memory</div>
-            <button class="prompt-card" data-query="What are the pricing tiers?">
-              <div class="prompt-text">"What are the pricing tiers?"</div>
+            <div class="prompt-category">🧠 MemRAG Document Retrieval</div>
+            <button class="prompt-card" data-query="What are the pricing tiers for CloudScale AI?">
+              <div class="prompt-text">"What are the pricing tiers for CloudScale AI?"</div>
               <div class="prompt-tags">
                 <span class="tag tag-memory">MEMORY</span>
                 <span class="tag tag-doc">pricing.md</span>
               </div>
             </button>
+            <button class="prompt-card" data-query="How much does the Developer tier cost?">
+              <div class="prompt-text">"How much does the Developer tier cost?"</div>
+              <div class="prompt-tags">
+                <span class="tag tag-memory">MEMORY</span>
+                <span class="tag tag-doc">pricing.md Ground-Truth</span>
+              </div>
+            </button>
+            <button class="prompt-card" data-query="What features are included in Enterprise tier?">
+              <div class="prompt-text">"What features are included in Enterprise tier?"</div>
+              <div class="prompt-tags">
+                <span class="tag tag-memory">MEMORY</span>
+                <span class="tag tag-doc">pricing.md SLA & VPC</span>
+              </div>
+            </button>
+
+            <div class="prompt-category">💬 Multi-Turn Session Memory</div>
             <button class="prompt-card" data-query="What was my first question?">
               <div class="prompt-text">"What was my first question?"</div>
               <div class="prompt-tags">
                 <span class="tag tag-memory">MEMORY</span>
                 <span class="tag tag-session">Multi-Turn History</span>
+              </div>
+            </button>
+            <button class="prompt-card" data-query="and the second one?">
+              <div class="prompt-text">"and the second one?"</div>
+              <div class="prompt-tags">
+                <span class="tag tag-memory">MEMORY</span>
+                <span class="tag tag-session">Follow-up Context</span>
               </div>
             </button>
           </div>
@@ -313,14 +384,16 @@
             <div class="welcome-icon">🚀</div>
             <h2>Adaptive Context Engineering Framework</h2>
             <p>
-              Experience hybrid adaptive retrieval combining <strong>Neo4j GraphRAG</strong>, 
-              <strong>ChromaDB MemRAG</strong>, and <strong>RAGCache-Lite</strong>. Ask any question below or choose a preset demo.
+              Production-grade hybrid context engineering for technical AI assistants. Dynamically routes queries
+              between
+              <strong>Neo4j GraphRAG</strong>, <strong>ChromaDB MemRAG</strong>, and <strong>Dual-Guard
+                RAGCacheLite</strong>.
             </p>
             <div class="features-pill-row">
-              <div class="feat-pill">⚡ Direct Cache Bypass</div>
-              <div class="feat-pill">🌲 1-Hop Graph AST Traversal</div>
-              <div class="feat-pill">📚 Sliding-Window Vector Recall</div>
-              <div class="feat-pill">🔒 Isolated Session Memory</div>
+              <div class="feat-pill">⚡ Dual-Guard Semantic Cache</div>
+              <div class="feat-pill">🌲 Multi-Hop AST & Call Traversal</div>
+              <div class="feat-pill">📚 Dual-Partition Quota-Preserving Recall</div>
+              <div class="feat-pill">🔒 Isolated Multi-Turn Session Memory</div>
             </div>
           </div>
         </div>
@@ -328,12 +401,9 @@
         <!-- Query Input Floating Dock -->
         <div class="query-dock">
           <form class="query-form" id="query-form">
-            <textarea 
-              id="query-input" 
-              placeholder="Ask anything (e.g. 'What does login call?' or 'What are the pricing tiers?')..." 
-              rows="1"
-              autofocus
-            ></textarea>
+            <textarea id="query-input"
+              placeholder="Ask anything (e.g. 'What does login call?' or 'What are the pricing tiers for CloudScale AI?')..."
+              rows="1" autofocus></textarea>
             <button type="submit" class="btn btn-send" id="btn-send" title="Send Query (Enter)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="22" y1="2" x2="11" y2="13" />
@@ -342,7 +412,8 @@
             </button>
           </form>
           <div class="dock-footer">
-            <span class="dock-hint">Press <strong>Enter</strong> to send, <strong>Shift + Enter</strong> for newline</span>
+            <span class="dock-hint">Press <strong>Enter</strong> to send, <strong>Shift + Enter</strong> for
+              newline</span>
             <span class="dock-status" id="dock-status">Ready</span>
           </div>
         </div>
@@ -358,7 +429,7 @@
                 <circle cx="11" cy="11" r="8"></circle>
                 <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
               </svg>
-              <input type="text" id="graph-search-input" placeholder="Search function, symbol, or file...">
+              <input type="text" id="graph-search-input" placeholder="Search function, method, class, or file...">
               <button id="graph-search-clear" class="btn-clear" style="display: none;">×</button>
             </div>
 
@@ -366,11 +437,15 @@
               <button class="filter-chip active chip-files" data-filter="file" title="Toggle File Nodes">
                 <span class="chip-dot dot-file"></span>Files <span class="chip-count" id="count-files">0</span>
               </button>
-              <button class="filter-chip active chip-functions" data-filter="function" title="Toggle Function Nodes">
-                <span class="chip-dot dot-func"></span>Functions <span class="chip-count" id="count-functions">0</span>
-              </button>
               <button class="filter-chip active chip-classes" data-filter="class" title="Toggle Class Nodes">
                 <span class="chip-dot dot-class"></span>Classes <span class="chip-count" id="count-classes">0</span>
+              </button>
+              <button class="filter-chip active chip-functions" data-filter="function"
+                title="Toggle Top-Level Function Nodes">
+                <span class="chip-dot dot-func"></span>Functions <span class="chip-count" id="count-functions">0</span>
+              </button>
+              <button class="filter-chip active chip-methods" data-filter="method" title="Toggle Class Methods">
+                <span class="chip-dot dot-method"></span>Methods <span class="chip-count" id="count-methods">0</span>
               </button>
               <span class="toolbar-divider"></span>
               <button class="filter-chip active chip-calls" data-rel="CALLS" title="Toggle CALLS relationships">
@@ -382,6 +457,10 @@
               <button class="filter-chip active chip-imports" data-rel="IMPORTS" title="Toggle IMPORTS relationships">
                 IMPORTS <span class="chip-count" id="count-imports">0</span>
               </button>
+              <button class="filter-chip active chip-contains" data-rel="CONTAINS"
+                title="Toggle CONTAINS lexical relationships">
+                CONTAINS <span class="chip-count" id="count-contains">0</span>
+              </button>
             </div>
           </div>
 
@@ -389,12 +468,22 @@
             <button class="btn btn-secondary btn-xs" id="btn-graph-zoom-in" title="Zoom In">+</button>
             <button class="btn btn-secondary btn-xs" id="btn-graph-zoom-out" title="Zoom Out">−</button>
             <button class="btn btn-secondary btn-xs" id="btn-graph-reset" title="Center & Fit Graph">Center</button>
-            <button class="btn btn-secondary btn-xs" id="btn-graph-physics" title="Pause / Resume Physics Simulation">Pause Physics</button>
+            <button class="btn btn-secondary btn-xs" id="btn-graph-physics"
+              title="Pause / Resume Physics Simulation">Pause Physics</button>
             <button class="btn btn-primary btn-xs" id="btn-graph-refresh" title="Reload graph from Neo4j">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
-                <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+                <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15">
+                </path>
               </svg>
               Refresh
+            </button>
+            <button class="btn btn-danger btn-xs" id="btn-graph-clear" onclick="graphVisualizer.clearGraph()"
+              title="Delete all nodes and relationships from Neo4j">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+              </svg>
+              Clear Graph
             </button>
           </div>
         </div>
@@ -412,17 +501,20 @@
           <!-- Legend Overlay -->
           <div class="graph-legend">
             <div class="legend-item"><span class="legend-dot dot-file"></span> File</div>
-            <div class="legend-item"><span class="legend-dot dot-func"></span> Function</div>
             <div class="legend-item"><span class="legend-dot dot-class"></span> Class</div>
+            <div class="legend-item"><span class="legend-dot dot-func"></span> Function</div>
+            <div class="legend-item"><span class="legend-dot dot-method"></span> Method</div>
             <div class="legend-sep"></div>
             <div class="legend-item"><span class="legend-line line-call"></span> CALLS</div>
             <div class="legend-item"><span class="legend-line line-def"></span> DEFINES</div>
             <div class="legend-item"><span class="legend-line line-imp"></span> IMPORTS</div>
+            <div class="legend-item"><span class="legend-line line-cont"></span> CONTAINS</div>
           </div>
 
           <!-- Bottom Control Hint -->
           <div class="graph-hint">
-            <span>Drag nodes • Scroll to zoom • Drag background to pan • Click node to view AST source</span>
+            <span>Drag nodes • Scroll to zoom • Drag canvas to pan • Click node to inspect lexical scope & AST
+              source</span>
           </div>
 
           <!-- Sliding Node Inspector Drawer -->
@@ -431,6 +523,7 @@
               <div class="inspector-title-group">
                 <span class="inspector-type-badge" id="inspector-type">Function</span>
                 <h3 id="inspector-name">login</h3>
+                <span class="inspector-qualname" id="inspector-qualname"></span>
               </div>
               <button class="btn-close-inspector" id="btn-close-inspector" title="Close Panel">×</button>
             </div>
@@ -438,8 +531,12 @@
             <div class="inspector-body">
               <div class="inspector-meta" id="inspector-meta">
                 <div class="meta-row">
-                  <span class="meta-label">Path:</span>
+                  <span class="meta-label">File:</span>
                   <span class="meta-value" id="inspector-file">auth.py</span>
+                </div>
+                <div class="meta-row" id="row-parent-class" style="display: none;">
+                  <span class="meta-label">Enclosing Class:</span>
+                  <span class="meta-value" id="inspector-parent-class"></span>
                 </div>
                 <div class="meta-row" id="row-lineno">
                   <span class="meta-label">Lines:</span>
@@ -453,7 +550,7 @@
               </div>
 
               <div class="inspector-section" id="section-source" style="display: none;">
-                <div class="section-title">AST Source Code</div>
+                <div class="section-title">AST Source Code Body</div>
                 <pre class="inspector-code"><code id="inspector-code-content"></code></pre>
               </div>
 
@@ -475,6 +572,10 @@
                   <div class="rel-label">Imports Modules:</div>
                   <div class="rel-chips" id="chips-imports"></div>
                 </div>
+                <div class="rel-group" id="group-contains" style="display: none;">
+                  <div class="rel-label">Contains Symbols:</div>
+                  <div class="rel-chips" id="chips-contains"></div>
+                </div>
               </div>
             </div>
           </aside>
@@ -483,6 +584,7 @@
     </div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=2.5"></script>
 </body>
+
 </html>
